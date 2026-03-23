@@ -1,0 +1,17 @@
+[project]
+name = "handheld"
+version = "0.1.0"
+description = "Control a cloud browser from your phone"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "modal>=1.3.5",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "httpx", "itsdangerous", "fastapi[standard]"]
