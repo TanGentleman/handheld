@@ -17,6 +17,7 @@ Prerequisites:
   - modal secret create rodney-auth RODNEY_API_TOKENS=tok1,tok2 RODNEY_COOKIE_SECRET=hex...
 """
 
+import hmac
 import string
 import subprocess
 import modal
@@ -449,7 +450,6 @@ def create_app():
     import os
 
     from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
-    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, RedirectResponse
     from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
     from pydantic import BaseModel
@@ -459,12 +459,19 @@ def create_app():
     COOKIE_NAME = "rodney_session"
     COOKIE_MAX_AGE = 30 * 24 * 3600  # 30 days
 
+    def _token_is_valid(candidate: str) -> bool:
+        """Constant-time check against all valid tokens to prevent timing attacks."""
+        candidate_b = candidate.encode("utf-8")
+        return any(
+            hmac.compare_digest(candidate_b, valid.encode("utf-8")) for valid in VALID_TOKENS
+        )
+
     def require_auth(request: Request) -> str:
         # Bearer token
         auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
-            if token in VALID_TOKENS:
+            if _token_is_valid(token):
                 return token
 
         # Signed cookie
@@ -472,7 +479,7 @@ def create_app():
         if cookie:
             try:
                 token = cookie_signer.loads(cookie, max_age=COOKIE_MAX_AGE)
-                if token in VALID_TOKENS:
+                if _token_is_valid(token):
                     return token
             except (BadSignature, SignatureExpired):
                 pass
@@ -481,12 +488,10 @@ def create_app():
 
     web_app = FastAPI(title="Handheld", docs_url="/docs")
 
-    web_app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # No CORS middleware — the UI is same-origin and API clients (curl,
+    # shortcuts) are not subject to browser CORS restrictions.  A wildcard
+    # allow_origins would let any malicious site make authenticated requests
+    # using the session cookie.
 
     # --- UI route ---
 
@@ -506,7 +511,7 @@ def create_app():
 
     @web_app.post("/login")
     def login_submit(token: str = Form(...)):
-        if token not in VALID_TOKENS:
+        if not _token_is_valid(token):
             return HTMLResponse(
                 LOGIN_PAGE.substitute(error='<p class="error">invalid token</p>'),
                 status_code=401,
@@ -519,7 +524,7 @@ def create_app():
             max_age=COOKIE_MAX_AGE,
             httponly=True,
             samesite="lax",
-            secure=False,  # Modal terminates TLS at the proxy; ASGI sees HTTP
+            secure=True,  # users access via HTTPS; Modal terminates TLS upstream
         )
         return response
 
@@ -553,6 +558,8 @@ def create_app():
 
     # --- Protected endpoints ---
 
+    MAX_TIMEOUT = 120  # seconds
+
     class RodneyCommand(BaseModel):
         args: list[str]
         timeout: int = 30
@@ -560,11 +567,13 @@ def create_app():
     @web_app.post("/run")
     def run_command(cmd: RodneyCommand, _token: str = Depends(require_auth)):
         """Run any rodney command. Example: {"args": ["open", "https://example.com"]}"""
+        if not cmd.args:
+            raise HTTPException(status_code=422, detail="args must not be empty")
         ensure_chrome()
         result = subprocess.run(
             ["rodney", "--global"] + cmd.args,
             capture_output=True,
-            timeout=cmd.timeout,
+            timeout=min(cmd.timeout, MAX_TIMEOUT),
         )
 
         stdout = result.stdout
@@ -663,9 +672,13 @@ def create_app():
 
     # --- Interaction endpoints (for UI) ---
 
+    COORD_MAX = 10_000  # generous upper bound for viewport coordinates
+
     @web_app.post("/click")
     def click_at(x: int, y: int, _token: str = Depends(require_auth)):
         """Click at page coordinates (x, y)."""
+        x = max(0, min(x, COORD_MAX))
+        y = max(0, min(y, COORD_MAX))
         ensure_chrome()
         js_code = f"""(function(){{
             var el=document.elementFromPoint({x},{y});
@@ -682,9 +695,13 @@ def create_app():
         )
         return {"exit_code": result.returncode, "clicked": result.stdout.strip()}
 
+    SCROLL_MAX = 50_000  # generous bound for scroll delta
+
     @web_app.post("/scroll")
     def scroll(dx: int = 0, dy: int = 0, _token: str = Depends(require_auth)):
         """Scroll the page by (dx, dy) pixels."""
+        dx = max(-SCROLL_MAX, min(dx, SCROLL_MAX))
+        dy = max(-SCROLL_MAX, min(dy, SCROLL_MAX))
         ensure_chrome()
         result = subprocess.run(
             ["rodney", "--global", "js", f"window.scrollBy({dx},{dy})"],

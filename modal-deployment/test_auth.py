@@ -31,7 +31,7 @@ def client():
     ):
         from deploy import create_app
 
-        yield TestClient(create_app())
+        yield TestClient(create_app(), base_url="https://testserver")
 
 
 @pytest.fixture()
@@ -132,7 +132,7 @@ def test_revoked_token_cookie_fails():
     ):
         from deploy import create_app
 
-        client = TestClient(create_app())
+        client = TestClient(create_app(), base_url="https://testserver")
         client.post("/login", data={"token": "bravo-token-bbb"})
         assert client.get("/status").status_code == 200
 
@@ -144,7 +144,7 @@ def test_revoked_token_cookie_fails():
     ):
         from deploy import create_app
 
-        new_client = TestClient(create_app())
+        new_client = TestClient(create_app(), base_url="https://testserver")
         # Copy the cookie from old client
         new_client.cookies = client.cookies
         assert new_client.get("/status").status_code == 401
@@ -197,3 +197,17 @@ def test_logout_clears_cookie(authed_client):
 def test_all_protected_endpoints_require_auth(client, method, path):
     r = client.request(method, path, json={"args": ["status"]} if path == "/run" else None)
     assert r.status_code == 401, f"{method} {path} should be 401, got {r.status_code}"
+
+
+# ---- Input validation ----
+
+
+def test_run_empty_args_rejected(authed_client):
+    r = authed_client.post("/run", json={"args": []})
+    assert r.status_code == 422
+
+
+def test_run_timeout_capped(authed_client):
+    """Timeout should be capped at MAX_TIMEOUT (120s), not use the user-supplied value."""
+    r = authed_client.post("/run", json={"args": ["status"], "timeout": 9999})
+    assert r.status_code == 200
