@@ -17,6 +17,7 @@ Prerequisites:
   - modal secret create rodney-auth RODNEY_API_TOKENS=tok1,tok2 RODNEY_COOKIE_SECRET=hex...
 """
 
+import hmac
 import string
 import subprocess
 import modal
@@ -459,12 +460,19 @@ def create_app():
     COOKIE_NAME = "rodney_session"
     COOKIE_MAX_AGE = 30 * 24 * 3600  # 30 days
 
+    def _token_is_valid(candidate: str) -> bool:
+        """Constant-time check against all valid tokens to prevent timing attacks."""
+        candidate_b = candidate.encode("utf-8")
+        return any(
+            hmac.compare_digest(candidate_b, valid.encode("utf-8")) for valid in VALID_TOKENS
+        )
+
     def require_auth(request: Request) -> str:
         # Bearer token
         auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
-            if token in VALID_TOKENS:
+            if _token_is_valid(token):
                 return token
 
         # Signed cookie
@@ -472,7 +480,7 @@ def create_app():
         if cookie:
             try:
                 token = cookie_signer.loads(cookie, max_age=COOKIE_MAX_AGE)
-                if token in VALID_TOKENS:
+                if _token_is_valid(token):
                     return token
             except (BadSignature, SignatureExpired):
                 pass
@@ -506,7 +514,7 @@ def create_app():
 
     @web_app.post("/login")
     def login_submit(token: str = Form(...)):
-        if token not in VALID_TOKENS:
+        if not _token_is_valid(token):
             return HTMLResponse(
                 LOGIN_PAGE.substitute(error='<p class="error">invalid token</p>'),
                 status_code=401,
