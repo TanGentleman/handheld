@@ -376,6 +376,15 @@ body{
   display:none;
 }
 .drawer pre.has-output{display:block}
+.cmd-row{
+  display:flex;gap:8px;margin-bottom:10px;
+}
+.cmd-row button{
+  flex:1;padding:9px 8px;background:#1e1e1e;color:#ccc;border:1px solid #333;
+  border-radius:8px;font-size:.8rem;cursor:pointer;font-family:inherit;
+}
+.cmd-row button:hover{background:#2a2a2a;color:#fff;border-color:#444}
+.cmd-row button:active{transform:scale(.97)}
 </style>
 </head><body>
 
@@ -425,6 +434,11 @@ body{
 <div id="cmd-overlay" class="overlay">
   <div class="drawer">
     <h3>run command</h3>
+    <div class="cmd-row">
+      <button type="button" id="btn-cmd-start">start</button>
+      <button type="button" id="btn-cmd-stop">stop</button>
+      <button type="button" id="btn-cmd-status">status</button>
+    </div>
     <input type="text" id="cmd-input" placeholder="e.g. click #submit">
     <button class="primary" id="btn-cmd-go">run</button>
     <pre id="cmd-output"></pre>
@@ -582,10 +596,7 @@ body{
   // --- Command drawer ---
   $$('btn-cmd').addEventListener('click', () => $$('cmd-overlay').classList.toggle('show'));
   $$('cmd-overlay').addEventListener('click', function(e) { if (e.target === this) this.classList.remove('show'); });
-  $$('btn-cmd-go').addEventListener('click', async () => {
-    const raw = $$('cmd-input').value.trim();
-    if (!raw) return;
-    const args = raw.match(/(?:[^\\s"]+|"[^"]*")+/g).map(s => s.replace(/^"|"$$/g,''));
+  async function execRun(args) {
     const r = await api('POST', '/run', { args });
     if (!r) return;
     const d = await r.json();
@@ -593,6 +604,15 @@ body{
     out.textContent = JSON.stringify(d, null, 2);
     out.classList.add('has-output');
     await refreshScreen();
+  }
+  $$('btn-cmd-start').addEventListener('click', () => execRun(['start']));
+  $$('btn-cmd-stop').addEventListener('click', () => execRun(['stop']));
+  $$('btn-cmd-status').addEventListener('click', () => execRun(['status']));
+  $$('btn-cmd-go').addEventListener('click', async () => {
+    const raw = $$('cmd-input').value.trim();
+    if (!raw) return;
+    const args = raw.match(/(?:[^\\s"]+|"[^"]*")+/g).map(s => s.replace(/^"|"$$/g,''));
+    await execRun(args);
   });
   $$('cmd-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') { e.preventDefault(); $$('btn-cmd-go').click(); }
