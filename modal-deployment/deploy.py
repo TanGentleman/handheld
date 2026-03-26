@@ -20,7 +20,14 @@ import hmac
 import random
 import string
 import subprocess
+from pathlib import Path
+
 import modal
+
+# Directory containing this file (used for Modal image mounts and local pytest).
+_DEPLOY_ROOT = Path(__file__).resolve().parent
+# In the container, `web/` is copied here so HTML can be read at runtime (see `rodney_image`).
+_HANDHELD_WEB_MOUNT = "/opt/handheld-web"
 
 # --- Image ---
 
@@ -40,11 +47,17 @@ rodney_image = (
         "GOPATH=/root/go CGO_ENABLED=0 /usr/local/go/bin/go install -ldflags='-s -w' github.com/simonw/rodney@latest",
     )
     .uv_pip_install("fastapi[standard]", "itsdangerous")
+    .add_local_dir(
+        _DEPLOY_ROOT / "web",
+        remote_path=_HANDHELD_WEB_MOUNT,
+        copy=True,
+    )
     .env(
         {
             "ROD_CHROME_BIN": "/usr/bin/chromium",
             "RODNEY_HOME": "/root/.rodney",
             "PATH": "/root/go/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "HANDHELD_WEB_DIR": _HANDHELD_WEB_MOUNT,
         }
     )
 )
@@ -222,612 +235,7 @@ class BrowserAgent:
         }
 
 
-# --- Login page ---
-
-LOGIN_PAGE = string.Template("""\
-<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Handheld</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{
-  min-height:100vh;display:flex;align-items:center;justify-content:center;
-  background:#0a0a0a;color:#e0e0e0;font-family:'SF Mono',ui-monospace,'Fira Code',monospace;
-}
-.card{
-  background:#141414;border:1px solid #2a2a2a;border-radius:16px;
-  padding:2.5rem;width:min(380px,90vw);box-shadow:0 16px 48px rgba(0,0,0,.6);
-}
-h1{font-size:1.5rem;font-weight:500;letter-spacing:-.02em;color:#fff}
-p.sub{color:#666;font-size:.8rem;margin-top:.4rem;margin-bottom:2rem}
-input[type=password]{
-  width:100%;padding:.8rem 1rem;background:#0a0a0a;border:1px solid #333;
-  border-radius:10px;color:#fff;font-family:inherit;font-size:.95rem;
-  margin-bottom:1rem;outline:none;transition:border-color .2s;
-}
-input[type=password]:focus{border-color:#646cff}
-input[type=password]::placeholder{color:#444}
-button{
-  width:100%;padding:.8rem;background:#646cff;color:#fff;border:none;
-  border-radius:10px;font-size:.95rem;cursor:pointer;font-family:inherit;
-  font-weight:500;transition:background .15s,transform .1s;
-}
-button:hover{background:#535bf2}
-button:active{transform:scale(.98)}
-.error{color:#ff6b6b;font-size:.8rem;margin-bottom:1rem}
-</style>
-</head><body>
-<div class="card">
-  <h1>Handheld</h1>
-  <p class="sub">enter your access token</p>
-  $error
-  <form method="POST" action="/login">
-    <input type="password" name="token" placeholder="token" autofocus required>
-    <button type="submit">authenticate</button>
-  </form>
-</div>
-</body></html>""")
-
-# --- Browser UI (scoped to an agent) ---
-
-UI_PAGE = string.Template("""\
-<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>Handheld</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;overflow:hidden}
-body{
-  display:flex;flex-direction:column;
-  background:#0a0a0a;color:#e0e0e0;
-  font-family:'SF Mono',ui-monospace,'Fira Code',monospace;
-}
-
-/* URL bar */
-#urlbar{
-  display:flex;align-items:center;gap:6px;
-  padding:8px 10px;background:#141414;border-bottom:1px solid #2a2a2a;
-  flex-shrink:0;
-}
-#urlbar button{
-  width:36px;height:36px;border:none;border-radius:8px;
-  background:#1e1e1e;color:#999;font-size:1rem;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;
-}
-#urlbar button:hover{background:#2a2a2a;color:#fff}
-#urlbar button:active{transform:scale(.93)}
-#nav-form{flex:1;display:flex}
-#url-input{
-  flex:1;padding:8px 12px;background:#0a0a0a;border:1px solid #333;
-  border-radius:8px;color:#fff;font-family:inherit;font-size:.85rem;
-  outline:none;min-width:0;
-}
-#url-input:focus{border-color:#646cff}
-
-/* Status bar */
-#statusbar{
-  padding:4px 12px;background:#111;border-bottom:1px solid #1a1a1a;
-  font-size:.7rem;color:#555;display:flex;justify-content:space-between;
-  flex-shrink:0;
-}
-#statusbar .title{color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-#statusbar .indicator{width:8px;height:8px;border-radius:50%;background:#333;flex-shrink:0;margin-left:8px;align-self:center}
-#statusbar .indicator.live{background:#4ade80}
-#statusbar .indicator.busy{background:#facc15}
-
-/* Screenshot viewport */
-#viewport{
-  flex:1;overflow:auto;position:relative;display:flex;
-  align-items:flex-start;justify-content:center;background:#000;
-}
-#screen{
-  width:100%;height:auto;display:block;
-  image-rendering:auto;
-}
-#click-overlay{
-  position:absolute;top:0;left:0;width:100%;height:100%;
-  cursor:crosshair;
-}
-.ripple{
-  position:absolute;width:30px;height:30px;border-radius:50%;
-  border:2px solid #646cff;pointer-events:none;
-  animation:ripple-out .5s ease-out forwards;
-}
-@keyframes ripple-out{
-  0%{transform:translate(-50%,-50%) scale(0);opacity:1}
-  100%{transform:translate(-50%,-50%) scale(2);opacity:0}
-}
-
-/* Bottom toolbar */
-#toolbar{
-  display:flex;align-items:center;justify-content:space-around;
-  padding:8px 4px;background:#141414;border-top:1px solid #2a2a2a;
-  flex-shrink:0;
-}
-#toolbar button{
-  width:44px;height:44px;border:none;border-radius:10px;
-  background:transparent;color:#999;font-size:1.2rem;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;
-}
-#toolbar button:hover{background:#1e1e1e;color:#fff}
-#toolbar button:active{transform:scale(.9)}
-#toolbar button.active{color:#646cff}
-
-/* Modals / drawers */
-.overlay{
-  display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;
-}
-.overlay.show{display:flex;align-items:flex-end;justify-content:center}
-.drawer{
-  background:#141414;border:1px solid #2a2a2a;border-radius:16px 16px 0 0;
-  padding:20px;width:100%;max-width:500px;max-height:60vh;overflow-y:auto;
-}
-.drawer h3{font-size:.9rem;font-weight:500;color:#fff;margin-bottom:12px}
-.drawer input[type=text]{
-  width:100%;padding:8px 12px;background:#0a0a0a;border:1px solid #333;
-  border-radius:8px;color:#fff;font-family:inherit;font-size:.85rem;
-  outline:none;margin-bottom:8px;
-}
-.drawer input[type=text]:focus{border-color:#646cff}
-.drawer button.primary{
-  width:100%;padding:10px;background:#646cff;color:#fff;border:none;
-  border-radius:8px;font-size:.85rem;cursor:pointer;font-family:inherit;
-  font-weight:500;margin-top:4px;
-}
-.drawer button.primary:hover{background:#535bf2}
-.drawer pre{
-  margin-top:10px;padding:10px;background:#0a0a0a;border:1px solid #2a2a2a;
-  border-radius:8px;font-size:.75rem;color:#888;overflow-x:auto;
-  white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;
-  display:none;
-}
-.drawer pre.has-output{display:block}
-.cmd-row{
-  display:flex;gap:8px;margin-bottom:10px;
-}
-.cmd-row button{
-  flex:1;padding:9px 8px;background:#1e1e1e;color:#ccc;border:1px solid #333;
-  border-radius:8px;font-size:.8rem;cursor:pointer;font-family:inherit;
-}
-.cmd-row button:hover{background:#2a2a2a;color:#fff;border-color:#444}
-.cmd-row button:active{transform:scale(.97)}
-.drawer .drawer-hint{font-size:.72rem;color:#666;margin:-6px 0 10px}
-.drawer .poll-options{display:flex;flex-direction:column;gap:2px}
-.drawer label.poll-opt{
-  display:flex;align-items:center;gap:10px;padding:10px 12px;
-  background:#0a0a0a;border:1px solid #2a2a2a;border-radius:8px;
-  font-size:.8rem;color:#ccc;cursor:pointer;
-}
-.drawer label.poll-opt.poll-opt-on{border-color:#646cff;color:#fff}
-.drawer label.poll-opt input{accent-color:#646cff;width:16px;height:16px;flex-shrink:0}
-</style>
-</head><body>
-
-<!-- URL bar -->
-<div id="urlbar">
-  <button id="btn-back" title="Back">&#9664;</button>
-  <button id="btn-fwd" title="Forward">&#9654;</button>
-  <form id="nav-form">
-    <input type="text" id="url-input" placeholder="Enter URL..." autocapitalize="none" autocorrect="off" spellcheck="false">
-  </form>
-  <button id="btn-go" title="Go">&#10148;</button>
-</div>
-
-<!-- Status bar -->
-<div id="statusbar">
-  <span class="title" id="page-title">connecting...</span>
-  <span class="indicator" id="status-dot"></span>
-</div>
-
-<!-- Screenshot viewport -->
-<div id="viewport">
-  <img id="screen" alt="">
-  <div id="click-overlay"></div>
-</div>
-
-<!-- Bottom toolbar -->
-<div id="toolbar">
-  <button id="btn-refresh" title="Refresh screenshot">&#8635;</button>
-  <button id="btn-scroll-up" title="Scroll up">&#9650;</button>
-  <button id="btn-scroll-down" title="Scroll down">&#9660;</button>
-  <button id="btn-type" title="Type text">&#9000;</button>
-  <button id="btn-cmd" title="Run command">&#9776;</button>
-  <button id="btn-settings" title="Settings">&#9881;</button>
-  <button id="btn-agents" title="Agents">&#8962;</button>
-</div>
-
-<!-- Type drawer -->
-<div id="type-overlay" class="overlay">
-  <div class="drawer">
-    <h3>type text</h3>
-    <input type="text" id="type-selector" placeholder="CSS selector (e.g. input[name=q])">
-    <input type="text" id="type-text" placeholder="text to type">
-    <button class="primary" id="btn-type-go">send</button>
-  </div>
-</div>
-
-<!-- Command drawer -->
-<div id="cmd-overlay" class="overlay">
-  <div class="drawer">
-    <h3>run command</h3>
-    <div class="cmd-row">
-      <button type="button" id="btn-cmd-start">start</button>
-      <button type="button" id="btn-cmd-stop">stop</button>
-      <button type="button" id="btn-cmd-status">status</button>
-    </div>
-    <input type="text" id="cmd-input" placeholder="e.g. click #submit">
-    <button class="primary" id="btn-cmd-go">run</button>
-    <pre id="cmd-output"></pre>
-  </div>
-</div>
-
-<!-- Settings drawer -->
-<div id="settings-overlay" class="overlay">
-  <div class="drawer">
-    <h3>settings</h3>
-    <p class="drawer-hint">Screenshot refresh (auto)</p>
-    <div class="poll-options">
-      <label class="poll-opt"><input type="radio" name="poll-fps" value="1"> Every 1s</label>
-      <label class="poll-opt"><input type="radio" name="poll-fps" value="5"> Every 5s</label>
-      <label class="poll-opt"><input type="radio" name="poll-fps" value="off"> No auto-refresh</label>
-    </div>
-  </div>
-</div>
-
-<script>
-(function(){
-  // Agent ID is embedded by the server
-  const AGENT_ID = '$agent_id';
-  const BASE = '/agents/' + AGENT_ID;
-  const POLL_STORAGE = 'handheld_screenshot_poll';
-
-  // --- State ---
-  const S = { pollIntervalMs: 5000, busy: false, vpW: 1920, vpH: 1080, urlFocused: false };
-
-  // --- Elements ---
-  const $$ = id => document.getElementById(id);
-  const screen    = $$('screen');
-  const overlay   = $$('click-overlay');
-  const urlInput  = $$('url-input');
-  const titleEl   = $$('page-title');
-  const dot       = $$('status-dot');
-
-  // --- Helpers ---
-  async function api(method, path, body) {
-    S.busy = true; dot.className = 'indicator busy';
-    try {
-      const opts = { method };
-      if (body) { opts.headers = {'Content-Type':'application/json'}; opts.body = JSON.stringify(body); }
-      const r = await fetch(BASE + path, opts);
-      if (r.status === 401) { window.location = '/login'; return null; }
-      return r;
-    } finally { S.busy = false; dot.className = 'indicator live'; }
-  }
-
-  // --- Screenshot polling ---
-  async function refreshScreen() {
-    try {
-      const r = await fetch(BASE + '/screenshot');
-      if (!r.ok) return;
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const old = screen.src;
-      screen.src = url;
-      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
-    } catch(e) { dot.className = 'indicator'; }
-  }
-
-  async function syncUrl() {
-    if (S.urlFocused) return;
-    try {
-      const r = await fetch(BASE + '/url');
-      if (!r.ok) return;
-      const d = await r.json();
-      if (d.url) urlInput.value = d.url;
-    } catch(e) {}
-  }
-
-  async function syncTitle() {
-    try {
-      const r = await fetch(BASE + '/title');
-      if (!r.ok) return;
-      const d = await r.json();
-      titleEl.textContent = d.title || 'untitled';
-    } catch(e) {}
-  }
-
-  function applyPollMode(mode) {
-    if (mode === 'off') S.pollIntervalMs = null;
-    else if (mode === '5') S.pollIntervalMs = 5000;
-    else S.pollIntervalMs = 1000;
-  }
-
-  function syncPollLabels() {
-    document.querySelectorAll('label.poll-opt').forEach(function(lab) { lab.classList.remove('poll-opt-on'); });
-    const c = document.querySelector('input[name="poll-fps"]:checked');
-    if (c) {
-      const lab = c.closest('label');
-      if (lab) lab.classList.add('poll-opt-on');
-    }
-  }
-
-  function loadPollMode() {
-    let v = localStorage.getItem(POLL_STORAGE);
-    if (v !== '1' && v !== '5' && v !== 'off') v = '5';
-    applyPollMode(v);
-    document.querySelectorAll('input[name="poll-fps"]').forEach(function(inp) {
-      inp.checked = inp.value === v;
-    });
-    syncPollLabels();
-  }
-
-  async function poll() {
-    while (true) {
-      const iv = S.pollIntervalMs;
-      if (iv != null && !S.busy) {
-        await refreshScreen();
-        if (!S._c) S._c = 0;
-        if (++S._c % 3 === 0) { syncUrl(); syncTitle(); }
-      }
-      await new Promise(r => setTimeout(r, iv != null ? iv : 800));
-    }
-  }
-
-  // --- Viewport detection ---
-  async function detectViewport() {
-    try {
-      const r = await api('GET', '/viewport');
-      if (!r) return;
-      const d = await r.json();
-      const vp = JSON.parse(d.viewport);
-      S.vpW = vp.w; S.vpH = vp.h;
-    } catch(e) {}
-  }
-
-  // --- Click ---
-  function showRipple(x, y) {
-    const el = document.createElement('div');
-    el.className = 'ripple';
-    el.style.left = x + 'px'; el.style.top = y + 'px';
-    $$('viewport').appendChild(el);
-    setTimeout(() => el.remove(), 500);
-  }
-
-  overlay.addEventListener('click', async function(e) {
-    const rect = screen.getBoundingClientRect();
-    const scaleX = S.vpW / rect.width;
-    const scaleY = S.vpH / rect.height;
-    const x = Math.round((e.clientX - rect.left) * scaleX);
-    const y = Math.round((e.clientY - rect.top) * scaleY);
-    showRipple(e.clientX - $$('viewport').getBoundingClientRect().left,
-               e.clientY - $$('viewport').getBoundingClientRect().top);
-    await api('POST', '/click?x=' + x + '&y=' + y);
-    await refreshScreen();
-    syncUrl(); syncTitle();
-  });
-
-  // --- Navigation ---
-  $$('nav-form').addEventListener('submit', async function(e) {
-    e.preventDefault();
-    let url = urlInput.value.trim();
-    if (!url) return;
-    if (!/^https?:\\/\\//.test(url)) url = 'https://' + url;
-    urlInput.blur();
-    await api('POST', '/open?url=' + encodeURIComponent(url));
-    await refreshScreen();
-    syncUrl(); syncTitle();
-  });
-  $$('btn-go').addEventListener('click', () => $$('nav-form').dispatchEvent(new Event('submit')));
-  $$('btn-back').addEventListener('click', async () => {
-    await api('POST', '/js?expression=' + encodeURIComponent('history.back()'));
-    setTimeout(async () => { await refreshScreen(); syncUrl(); syncTitle(); }, 500);
-  });
-  $$('btn-fwd').addEventListener('click', async () => {
-    await api('POST', '/js?expression=' + encodeURIComponent('history.forward()'));
-    setTimeout(async () => { await refreshScreen(); syncUrl(); syncTitle(); }, 500);
-  });
-
-  urlInput.addEventListener('focus', () => { S.urlFocused = true; urlInput.select(); });
-  urlInput.addEventListener('blur', () => { S.urlFocused = false; });
-
-  // --- Toolbar ---
-  $$('btn-refresh').addEventListener('click', async () => { await refreshScreen(); syncUrl(); syncTitle(); });
-  $$('btn-scroll-up').addEventListener('click', async () => { await api('POST','/scroll?dy=-500'); await refreshScreen(); });
-  $$('btn-scroll-down').addEventListener('click', async () => { await api('POST','/scroll?dy=500'); await refreshScreen(); });
-
-  // --- Type drawer ---
-  $$('btn-type').addEventListener('click', () => $$('type-overlay').classList.toggle('show'));
-  $$('type-overlay').addEventListener('click', function(e) { if (e.target === this) this.classList.remove('show'); });
-  $$('btn-type-go').addEventListener('click', async () => {
-    const sel = $$('type-selector').value.trim();
-    const txt = $$('type-text').value;
-    if (!sel || !txt) return;
-    await api('POST', '/run', { args: ['type', sel, txt] });
-    $$('type-overlay').classList.remove('show');
-    $$('type-selector').value = ''; $$('type-text').value = '';
-    await refreshScreen();
-  });
-
-  // --- Command drawer ---
-  $$('btn-cmd').addEventListener('click', () => $$('cmd-overlay').classList.toggle('show'));
-  $$('cmd-overlay').addEventListener('click', function(e) { if (e.target === this) this.classList.remove('show'); });
-  async function execRun(args) {
-    const r = await api('POST', '/run', { args });
-    if (!r) return;
-    const d = await r.json();
-    const out = $$('cmd-output');
-    out.textContent = JSON.stringify(d, null, 2);
-    out.classList.add('has-output');
-    await refreshScreen();
-  }
-  $$('btn-cmd-start').addEventListener('click', () => execRun(['start']));
-  $$('btn-cmd-stop').addEventListener('click', () => execRun(['stop']));
-  $$('btn-cmd-status').addEventListener('click', () => execRun(['status']));
-  $$('btn-cmd-go').addEventListener('click', async () => {
-    const raw = $$('cmd-input').value.trim();
-    if (!raw) return;
-    const args = raw.match(/(?:[^\\s"]+|"[^"]*")+/g).map(s => s.replace(/^"|"$$/g,''));
-    await execRun(args);
-  });
-  $$('cmd-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') { e.preventDefault(); $$('btn-cmd-go').click(); }
-  });
-
-  // --- Settings drawer ---
-  $$('btn-settings').addEventListener('click', () => {
-    loadPollMode();
-    $$('settings-overlay').classList.toggle('show');
-  });
-  $$('settings-overlay').addEventListener('click', function(e) { if (e.target === this) this.classList.remove('show'); });
-  document.querySelectorAll('input[name="poll-fps"]').forEach(function(inp) {
-    inp.addEventListener('change', function() {
-      if (!this.checked) return;
-      localStorage.setItem(POLL_STORAGE, this.value);
-      applyPollMode(this.value);
-      syncPollLabels();
-    });
-  });
-
-  // --- Agents button → go to dashboard ---
-  $$('btn-agents').addEventListener('click', () => { window.location = '/'; });
-
-  // --- Init ---
-  loadPollMode();
-  detectViewport();
-  dot.className = 'indicator live';
-  poll();
-})();
-</script>
-</body></html>
-""")
-
-# --- Agent dashboard UI ---
-
-DASHBOARD_PAGE = """\
-<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Handheld</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{
-  min-height:100vh;
-  background:#0a0a0a;color:#e0e0e0;
-  font-family:'SF Mono',ui-monospace,'Fira Code',monospace;
-}
-.container{max-width:500px;margin:0 auto;padding:20px 16px}
-h1{font-size:1.3rem;font-weight:500;letter-spacing:-.02em;color:#fff;margin-bottom:4px}
-p.sub{color:#666;font-size:.75rem;margin-bottom:20px}
-
-.agent-card{
-  background:#141414;border:1px solid #2a2a2a;border-radius:12px;
-  padding:16px;margin-bottom:10px;cursor:pointer;
-  transition:border-color .15s,transform .1s;display:flex;
-  justify-content:space-between;align-items:center;
-}
-.agent-card:hover{border-color:#646cff}
-.agent-card:active{transform:scale(.98)}
-.agent-info .agent-id{font-size:.85rem;color:#fff;font-weight:500}
-.agent-info .agent-meta{font-size:.7rem;color:#666;margin-top:2px}
-.agent-actions{display:flex;gap:6px}
-.agent-actions button{
-  width:32px;height:32px;border:none;border-radius:8px;
-  background:#1e1e1e;color:#999;font-size:.8rem;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;
-}
-.agent-actions button:hover{background:#2a2a2a;color:#fff}
-.agent-actions button.delete:hover{background:#3a1515;color:#ff6b6b}
-
-#btn-new{
-  width:100%;padding:12px;background:#646cff;color:#fff;border:none;
-  border-radius:10px;font-size:.85rem;cursor:pointer;font-family:inherit;
-  font-weight:500;margin-top:6px;transition:background .15s,transform .1s;
-}
-#btn-new:hover{background:#535bf2}
-#btn-new:active{transform:scale(.98)}
-#btn-new:disabled{opacity:.5;cursor:not-allowed}
-
-.empty{text-align:center;color:#555;font-size:.8rem;padding:30px 0}
-#agent-list{min-height:60px}
-</style>
-</head><body>
-<div class="container">
-  <h1>Handheld</h1>
-  <p class="sub">browser agents</p>
-  <div id="agent-list"><div class="empty">loading...</div></div>
-  <button id="btn-new">+ new agent</button>
-</div>
-
-<script>
-(function(){
-  const list = document.getElementById('agent-list');
-  const btnNew = document.getElementById('btn-new');
-
-  async function loadAgents() {
-    try {
-      const r = await fetch('/agents');
-      if (r.status === 401) { window.location = '/login'; return; }
-      const agents = await r.json();
-      if (agents.length === 0) {
-        list.innerHTML = '<div class="empty">no agents running</div>';
-        return;
-      }
-      list.innerHTML = agents.map(a => `
-        <div class="agent-card" data-id="${a.id}">
-          <div class="agent-info">
-            <div class="agent-id">${a.id}</div>
-            <div class="agent-meta">${a.purpose || 'browser agent'}</div>
-          </div>
-          <div class="agent-actions">
-            <button class="delete" data-id="${a.id}" title="Delete">&#10005;</button>
-          </div>
-        </div>
-      `).join('');
-
-      // Click card → open agent UI
-      list.querySelectorAll('.agent-card').forEach(card => {
-        card.addEventListener('click', (e) => {
-          if (e.target.closest('.delete')) return;
-          window.location = '/agents/' + card.dataset.id + '/ui';
-        });
-      });
-
-      // Delete buttons
-      list.querySelectorAll('.delete').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const id = btn.dataset.id;
-          await fetch('/agents/' + id, { method: 'DELETE' });
-          loadAgents();
-        });
-      });
-    } catch(e) {
-      list.innerHTML = '<div class="empty">error loading agents</div>';
-    }
-  }
-
-  btnNew.addEventListener('click', async () => {
-    btnNew.disabled = true;
-    try {
-      const r = await fetch('/agents', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-      if (r.ok) {
-        const d = await r.json();
-        window.location = '/agents/' + d.agent_id + '/ui';
-      }
-    } finally { btnNew.disabled = false; }
-  });
-
-  loadAgents();
-})();
-</script>
-</body></html>
-"""
-
+# HTML templates: `web/login.html`, `web/dashboard.html`, `web/agent.html` (loaded in `create_app`).
 
 # --- App factory (importable by tests) ---
 
@@ -841,6 +249,12 @@ def create_app():
     from fastapi.responses import HTMLResponse, RedirectResponse
     from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
     from pydantic import BaseModel
+
+    web_dir_env = os.environ.get("HANDHELD_WEB_DIR")
+    web_dir = Path(web_dir_env) if web_dir_env else _DEPLOY_ROOT / "web"
+    login_tpl = string.Template((web_dir / "login.html").read_text(encoding="utf-8"))
+    agent_tpl = string.Template((web_dir / "agent.html").read_text(encoding="utf-8"))
+    dashboard_html = (web_dir / "dashboard.html").read_text(encoding="utf-8")
 
     VALID_TOKENS = set(os.environ["RODNEY_API_TOKENS"].split(","))
     cookie_signer = URLSafeTimedSerializer(os.environ["RODNEY_COOKIE_SECRET"])
@@ -906,7 +320,7 @@ def create_app():
             require_auth(request)
         except HTTPException:
             return RedirectResponse(url="/login", status_code=303)
-        return HTMLResponse(DASHBOARD_PAGE)
+        return HTMLResponse(dashboard_html)
 
     @web_app.get("/agents/{agent_id}/ui", response_class=HTMLResponse)
     def agent_ui(agent_id: str, request: Request):
@@ -915,19 +329,19 @@ def create_app():
         except HTTPException:
             return RedirectResponse(url="/login", status_code=303)
         _get_agent(agent_id)  # 404 if not found
-        return HTMLResponse(UI_PAGE.substitute(agent_id=agent_id))
+        return HTMLResponse(agent_tpl.substitute(agent_id=agent_id))
 
     # --- Auth routes (public) ---
 
     @web_app.get("/login", response_class=HTMLResponse)
     def login_page():
-        return LOGIN_PAGE.substitute(error="")
+        return login_tpl.substitute(error="")
 
     @web_app.post("/login")
     def login_submit(token: str = Form(...)):
         if not _token_is_valid(token):
             return HTMLResponse(
-                LOGIN_PAGE.substitute(error='<p class="error">invalid token</p>'),
+                login_tpl.substitute(error='<p class="error">invalid token</p>'),
                 status_code=401,
             )
         signed = cookie_signer.dumps(token)
