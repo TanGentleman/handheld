@@ -395,6 +395,15 @@ body{
 }
 .cmd-row button:hover{background:#2a2a2a;color:#fff;border-color:#444}
 .cmd-row button:active{transform:scale(.97)}
+.drawer .drawer-hint{font-size:.72rem;color:#666;margin:-6px 0 10px}
+.drawer .poll-options{display:flex;flex-direction:column;gap:2px}
+.drawer label.poll-opt{
+  display:flex;align-items:center;gap:10px;padding:10px 12px;
+  background:#0a0a0a;border:1px solid #2a2a2a;border-radius:8px;
+  font-size:.8rem;color:#ccc;cursor:pointer;
+}
+.drawer label.poll-opt.poll-opt-on{border-color:#646cff;color:#fff}
+.drawer label.poll-opt input{accent-color:#646cff;width:16px;height:16px;flex-shrink:0}
 </style>
 </head><body>
 
@@ -427,7 +436,8 @@ body{
   <button id="btn-scroll-down" title="Scroll down">&#9660;</button>
   <button id="btn-type" title="Type text">&#9000;</button>
   <button id="btn-cmd" title="Run command">&#9776;</button>
-  <button id="btn-agents" title="Agents">&#9881;</button>
+  <button id="btn-settings" title="Settings">&#9881;</button>
+  <button id="btn-agents" title="Agents">&#8962;</button>
 </div>
 
 <!-- Type drawer -->
@@ -455,14 +465,28 @@ body{
   </div>
 </div>
 
+<!-- Settings drawer -->
+<div id="settings-overlay" class="overlay">
+  <div class="drawer">
+    <h3>settings</h3>
+    <p class="drawer-hint">Screenshot refresh (auto)</p>
+    <div class="poll-options">
+      <label class="poll-opt"><input type="radio" name="poll-fps" value="1"> Every 1s</label>
+      <label class="poll-opt"><input type="radio" name="poll-fps" value="5"> Every 5s</label>
+      <label class="poll-opt"><input type="radio" name="poll-fps" value="off"> No auto-refresh</label>
+    </div>
+  </div>
+</div>
+
 <script>
 (function(){
   // Agent ID is embedded by the server
   const AGENT_ID = '$agent_id';
   const BASE = '/agents/' + AGENT_ID;
+  const POLL_STORAGE = 'handheld_screenshot_poll';
 
   // --- State ---
-  const S = { polling: true, busy: false, vpW: 1920, vpH: 1080, urlFocused: false };
+  const S = { pollIntervalMs: 5000, busy: false, vpW: 1920, vpH: 1080, urlFocused: false };
 
   // --- Elements ---
   const $$ = id => document.getElementById(id);
@@ -516,15 +540,40 @@ body{
     } catch(e) {}
   }
 
+  function applyPollMode(mode) {
+    if (mode === 'off') S.pollIntervalMs = null;
+    else if (mode === '5') S.pollIntervalMs = 5000;
+    else S.pollIntervalMs = 1000;
+  }
+
+  function syncPollLabels() {
+    document.querySelectorAll('label.poll-opt').forEach(function(lab) { lab.classList.remove('poll-opt-on'); });
+    const c = document.querySelector('input[name="poll-fps"]:checked');
+    if (c) {
+      const lab = c.closest('label');
+      if (lab) lab.classList.add('poll-opt-on');
+    }
+  }
+
+  function loadPollMode() {
+    let v = localStorage.getItem(POLL_STORAGE);
+    if (v !== '1' && v !== '5' && v !== 'off') v = '5';
+    applyPollMode(v);
+    document.querySelectorAll('input[name="poll-fps"]').forEach(function(inp) {
+      inp.checked = inp.value === v;
+    });
+    syncPollLabels();
+  }
+
   async function poll() {
     while (true) {
-      if (S.polling && !S.busy) {
+      const iv = S.pollIntervalMs;
+      if (iv != null && !S.busy) {
         await refreshScreen();
-        // sync url/title every 3rd frame
         if (!S._c) S._c = 0;
         if (++S._c % 3 === 0) { syncUrl(); syncTitle(); }
       }
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, iv != null ? iv : 800));
     }
   }
 
@@ -628,10 +677,26 @@ body{
     if (e.key === 'Enter') { e.preventDefault(); $$('btn-cmd-go').click(); }
   });
 
+  // --- Settings drawer ---
+  $$('btn-settings').addEventListener('click', () => {
+    loadPollMode();
+    $$('settings-overlay').classList.toggle('show');
+  });
+  $$('settings-overlay').addEventListener('click', function(e) { if (e.target === this) this.classList.remove('show'); });
+  document.querySelectorAll('input[name="poll-fps"]').forEach(function(inp) {
+    inp.addEventListener('change', function() {
+      if (!this.checked) return;
+      localStorage.setItem(POLL_STORAGE, this.value);
+      applyPollMode(this.value);
+      syncPollLabels();
+    });
+  });
+
   // --- Agents button → go to dashboard ---
   $$('btn-agents').addEventListener('click', () => { window.location = '/'; });
 
   // --- Init ---
+  loadPollMode();
   detectViewport();
   dot.className = 'indicator live';
   poll();
@@ -1086,10 +1151,10 @@ def create_app():
             required_keys=["RODNEY_API_TOKENS", "RODNEY_COOKIE_SECRET"],
         ),
     ],
-    min_containers=1,
     timeout=86400,
     scaledown_window=300,
 )
+@modal.concurrent(max_inputs=100)
 @modal.asgi_app()
 def api():
     return create_app()
