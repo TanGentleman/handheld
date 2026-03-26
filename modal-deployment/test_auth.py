@@ -1,16 +1,15 @@
 """
 Auth tests for Handheld's FastAPI app.
 
-Runs without Modal or Chromium — just patches env vars
-and subprocess calls so we can test auth flows in isolation.
+Runs without Modal or Chromium — patches env vars, BrowserAgent,
+and agent_registry so we can test auth flows in isolation.
 
     pytest test_auth.py -v
 """
 
 import os
 import time
-from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,18 +19,49 @@ TOKENS = "alpha-token-aaa,bravo-token-bbb"
 COOKIE_SECRET = "test-cookie-secret-for-signing"
 ENV = {"RODNEY_API_TOKENS": TOKENS, "RODNEY_COOKIE_SECRET": COOKIE_SECRET}
 
-FAKE_PROC = SimpleNamespace(returncode=0, stdout=b"ok", stderr=b"")
+# Fake return values that mimic BrowserAgent remote calls
+FAKE_STATUS = {"exit_code": 0, "output": "ok"}
+FAKE_SCREENSHOT = {"png": b"\x89PNG\r\n\x1a\nfakedata"}
+FAKE_URL = {"url": "https://example.com", "exit_code": 0}
+FAKE_TITLE = {"title": "Example", "exit_code": 0}
+FAKE_RUN = {"exit_code": 0, "stdout": "ok", "stderr": "", "is_binary": False}
+
+
+def _make_fake_agent():
+    """Create a mock BrowserAgent whose .method.remote() calls return canned data."""
+    agent = MagicMock()
+    agent.status.remote.return_value = FAKE_STATUS
+    agent.screenshot.remote.return_value = FAKE_SCREENSHOT
+    agent.get_url.remote.return_value = FAKE_URL
+    agent.get_title.remote.return_value = FAKE_TITLE
+    agent.open_url.remote.return_value = {"exit_code": 0, "stderr": ""}
+    agent.run_js.remote.return_value = {"result": "", "exit_code": 0, "stderr": ""}
+    agent.click.remote.return_value = {"exit_code": 0, "clicked": "DIV"}
+    agent.scroll.remote.return_value = {"exit_code": 0}
+    agent.viewport.remote.return_value = {"exit_code": 0, "viewport": '{"w":1920,"h":1080}'}
+    agent.run_command.remote.return_value = FAKE_RUN
+    return agent
+
+
+class FakeRegistry(dict):
+    """dict subclass that also supports .keys() iteration like modal.Dict."""
+    pass
 
 
 @pytest.fixture()
 def client():
-    with (
-        patch.dict(os.environ, ENV),
-        patch("subprocess.run", return_value=FAKE_PROC),
-    ):
-        from deploy import create_app
+    fake_registry = FakeRegistry()
+    fake_agent = _make_fake_agent()
 
-        yield TestClient(create_app())
+    with patch.dict(os.environ, ENV):
+        import deploy
+
+        # Patch the module-level agent_registry and BrowserAgent
+        with (
+            patch.object(deploy, "agent_registry", fake_registry),
+            patch.object(deploy, "BrowserAgent", return_value=fake_agent),
+        ):
+            yield TestClient(deploy.create_app())
 
 
 @pytest.fixture()
@@ -126,28 +156,34 @@ def test_tampered_cookie_rejected(client):
 
 def test_revoked_token_cookie_fails():
     """Login with bravo token, then remove it from valid set — cookie should stop working."""
-    with (
-        patch.dict(os.environ, ENV),
-        patch("subprocess.run", return_value=FAKE_PROC),
-    ):
-        from deploy import create_app
+    fake_registry = FakeRegistry()
+    fake_agent = _make_fake_agent()
 
-        client = TestClient(create_app())
-        client.post("/login", data={"token": "bravo-token-bbb"})
-        assert client.get("/status").status_code == 200
+    with patch.dict(os.environ, ENV):
+        import deploy
+
+        with (
+            patch.object(deploy, "agent_registry", fake_registry),
+            patch.object(deploy, "BrowserAgent", return_value=fake_agent),
+        ):
+            client = TestClient(deploy.create_app())
+            client.post("/login", data={"token": "bravo-token-bbb"})
+            assert client.get("/status").status_code == 200
 
     # Recreate app without bravo token
     revoked_env = {**ENV, "RODNEY_API_TOKENS": "alpha-token-aaa"}
-    with (
-        patch.dict(os.environ, revoked_env),
-        patch("subprocess.run", return_value=FAKE_PROC),
-    ):
-        from deploy import create_app
+    fake_registry2 = FakeRegistry()
+    with patch.dict(os.environ, revoked_env):
+        import deploy
 
-        new_client = TestClient(create_app())
-        # Copy the cookie from old client
-        new_client.cookies = client.cookies
-        assert new_client.get("/status").status_code == 401
+        with (
+            patch.object(deploy, "agent_registry", fake_registry2),
+            patch.object(deploy, "BrowserAgent", return_value=fake_agent),
+        ):
+            new_client = TestClient(deploy.create_app())
+            # Copy the cookie from old client
+            new_client.cookies = client.cookies
+            assert new_client.get("/status").status_code == 401
 
 
 # ---- Public routes ----
@@ -196,4 +232,72 @@ def test_logout_clears_cookie(authed_client):
 )
 def test_all_protected_endpoints_require_auth(client, method, path):
     r = client.request(method, path, json={"args": ["status"]} if path == "/run" else None)
+    assert r.status_code == 401, f"{method} {path} should be 401, got {r.status_code}"
+
+
+# ---- Agent lifecycle ----
+
+
+def test_create_agent(authed_client):
+    r = authed_client.post("/agents", json={"purpose": "test agent"})
+    assert r.status_code == 200
+    assert "agent_id" in r.json()
+
+
+def test_list_agents_empty(authed_client):
+    r = authed_client.get("/agents")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_list_agents_after_create(authed_client):
+    authed_client.post("/agents", json={"purpose": "test"})
+    r = authed_client.get("/agents")
+    assert r.status_code == 200
+    assert len(r.json()) == 1
+
+
+def test_delete_agent(authed_client):
+    r = authed_client.post("/agents", json={})
+    agent_id = r.json()["agent_id"]
+    r = authed_client.delete(f"/agents/{agent_id}")
+    assert r.status_code == 200
+    assert r.json()["deleted"] == agent_id
+    # Should be gone
+    r = authed_client.get(f"/agents/{agent_id}")
+    assert r.status_code == 404
+
+
+def test_delete_nonexistent_agent(authed_client):
+    r = authed_client.delete("/agents/nonexistent")
+    assert r.status_code == 404
+
+
+def test_agents_summary(authed_client):
+    authed_client.post("/agents", json={"purpose": "agent1"})
+    r = authed_client.get("/agents/summary")
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) == 1
+    assert "id" in data[0]
+    assert "status" in data[0]
+
+
+# ---- Scoped agent endpoints require auth ----
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("GET", "/agents/test123/status"),
+        ("GET", "/agents/test123/screenshot"),
+        ("GET", "/agents/test123/url"),
+        ("GET", "/agents/test123/title"),
+        ("POST", "/agents/test123/open?url=https://example.com"),
+        ("POST", "/agents/test123/js?expression=1"),
+        ("POST", "/agents/test123/run"),
+    ],
+)
+def test_scoped_endpoints_require_auth(client, method, path):
+    r = client.request(method, path, json={"args": ["status"]} if path.endswith("/run") else None)
     assert r.status_code == 401, f"{method} {path} should be 401, got {r.status_code}"
