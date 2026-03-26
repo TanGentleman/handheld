@@ -140,6 +140,16 @@ class BrowserAgent:
             ["rodney", "--global", "open", url],
             capture_output=True, text=True,
         )
+        if result.returncode != 0:
+            # e.g. user ran `rodney stop` — same start as @modal.enter
+            subprocess.run(
+                ["rodney", "start", "--global"],
+                capture_output=True, text=True,
+            )
+            result = subprocess.run(
+                ["rodney", "--global", "open", url],
+                capture_output=True, text=True,
+            )
         return {"exit_code": result.returncode, "stderr": result.stderr.strip()}
 
     @modal.method()
