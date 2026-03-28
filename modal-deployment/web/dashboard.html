@@ -67,34 +67,41 @@ p.sub{color:#666;font-size:.75rem;margin-bottom:20px}
         list.innerHTML = '<div class="empty">no agents running</div>';
         return;
       }
-      list.innerHTML = agents.map(a => `
-        <div class="agent-card" data-id="${a.id}">
-          <div class="agent-info">
-            <div class="agent-id">${a.id}</div>
-            <div class="agent-meta">${a.purpose || 'browser agent'}</div>
-          </div>
-          <div class="agent-actions">
-            <button class="delete" data-id="${a.id}" title="Delete">&#10005;</button>
-          </div>
-        </div>
-      `).join('');
+      list.innerHTML = '';
+      agents.forEach(a => {
+        const card = document.createElement('div');
+        card.className = 'agent-card';
+        card.dataset.id = a.id;
 
-      // Click card → open agent UI
-      list.querySelectorAll('.agent-card').forEach(card => {
-        card.addEventListener('click', (e) => {
-          if (e.target.closest('.delete')) return;
-          window.location = '/agents/' + card.dataset.id + '/ui';
-        });
-      });
+        const info = document.createElement('div');
+        info.className = 'agent-info';
+        const idDiv = document.createElement('div');
+        idDiv.className = 'agent-id';
+        idDiv.textContent = a.id;
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'agent-meta';
+        metaDiv.textContent = a.purpose || 'browser agent';
+        info.append(idDiv, metaDiv);
 
-      // Delete buttons
-      list.querySelectorAll('.delete').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
+        const actions = document.createElement('div');
+        actions.className = 'agent-actions';
+        const delBtn = document.createElement('button');
+        delBtn.className = 'delete';
+        delBtn.title = 'Delete';
+        delBtn.innerHTML = '&#10005;';
+        delBtn.addEventListener('click', async (e) => {
           e.stopPropagation();
-          const id = btn.dataset.id;
-          await fetch('/agents/' + id, { method: 'DELETE' });
+          await fetch('/agents/' + encodeURIComponent(a.id), { method: 'DELETE' });
           loadAgents();
         });
+        actions.appendChild(delBtn);
+
+        card.append(info, actions);
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('.delete')) return;
+          window.location = '/agents/' + encodeURIComponent(a.id) + '/ui';
+        });
+        list.appendChild(card);
       });
     } catch(e) {
       list.innerHTML = '<div class="empty">error loading agents</div>';
