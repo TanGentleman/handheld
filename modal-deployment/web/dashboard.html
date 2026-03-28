@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handheld</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  min-height:100vh;
+  background:#0a0a0a;color:#e0e0e0;
+  font-family:'SF Mono',ui-monospace,'Fira Code',monospace;
+}
+.container{max-width:500px;margin:0 auto;padding:20px 16px}
+h1{font-size:1.3rem;font-weight:500;letter-spacing:-.02em;color:#fff;margin-bottom:4px}
+p.sub{color:#666;font-size:.75rem;margin-bottom:20px}
+
+.agent-card{
+  background:#141414;border:1px solid #2a2a2a;border-radius:12px;
+  padding:16px;margin-bottom:10px;cursor:pointer;
+  transition:border-color .15s,transform .1s;display:flex;
+  justify-content:space-between;align-items:center;
+}
+.agent-card:hover{border-color:#646cff}
+.agent-card:active{transform:scale(.98)}
+.agent-info .agent-id{font-size:.85rem;color:#fff;font-weight:500}
+.agent-info .agent-meta{font-size:.7rem;color:#666;margin-top:2px}
+.agent-actions{display:flex;gap:6px}
+.agent-actions button{
+  width:32px;height:32px;border:none;border-radius:8px;
+  background:#1e1e1e;color:#999;font-size:.8rem;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+}
+.agent-actions button:hover{background:#2a2a2a;color:#fff}
+.agent-actions button.delete:hover{background:#3a1515;color:#ff6b6b}
+
+#btn-new{
+  width:100%;padding:12px;background:#646cff;color:#fff;border:none;
+  border-radius:10px;font-size:.85rem;cursor:pointer;font-family:inherit;
+  font-weight:500;margin-top:6px;transition:background .15s,transform .1s;
+}
+#btn-new:hover{background:#535bf2}
+#btn-new:active{transform:scale(.98)}
+#btn-new:disabled{opacity:.5;cursor:not-allowed}
+
+.empty{text-align:center;color:#555;font-size:.8rem;padding:30px 0}
+#agent-list{min-height:60px}
+</style>
+</head><body>
+<div class="container">
+  <h1>Handheld</h1>
+  <p class="sub">browser agents</p>
+  <div id="agent-list"><div class="empty">loading...</div></div>
+  <button id="btn-new">+ new agent</button>
+</div>
+
+<script>
+(function(){
+  const list = document.getElementById('agent-list');
+  const btnNew = document.getElementById('btn-new');
+
+  async function loadAgents() {
+    try {
+      const r = await fetch('/agents');
+      if (r.status === 401) { window.location = '/login'; return; }
+      const agents = await r.json();
+      if (agents.length === 0) {
+        list.innerHTML = '<div class="empty">no agents running</div>';
+        return;
+      }
+      list.innerHTML = '';
+      agents.forEach(a => {
+        const card = document.createElement('div');
+        card.className = 'agent-card';
+        card.dataset.id = a.id;
+
+        const info = document.createElement('div');
+        info.className = 'agent-info';
+        const idDiv = document.createElement('div');
+        idDiv.className = 'agent-id';
+        idDiv.textContent = a.id;
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'agent-meta';
+        metaDiv.textContent = a.purpose || 'browser agent';
+        info.append(idDiv, metaDiv);
+
+        const actions = document.createElement('div');
+        actions.className = 'agent-actions';
+        const delBtn = document.createElement('button');
+        delBtn.className = 'delete';
+        delBtn.title = 'Delete';
+        delBtn.innerHTML = '&#10005;';
+        delBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await fetch('/agents/' + encodeURIComponent(a.id), { method: 'DELETE' });
+          loadAgents();
+        });
+        actions.appendChild(delBtn);
+
+        card.append(info, actions);
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('.delete')) return;
+          window.location = '/agents/' + encodeURIComponent(a.id) + '/ui';
+        });
+        list.appendChild(card);
+      });
+    } catch(e) {
+      list.innerHTML = '<div class="empty">error loading agents</div>';
+    }
+  }
+
+  btnNew.addEventListener('click', async () => {
+    btnNew.disabled = true;
+    try {
+      const r = await fetch('/agents', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+      if (r.ok) {
+        const d = await r.json();
+        window.location = '/agents/' + d.agent_id + '/ui';
+      }
+    } finally { btnNew.disabled = false; }
+  });
+
+  loadAgents();
+})();
+</script>
+</body></html>
