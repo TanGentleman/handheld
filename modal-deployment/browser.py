@@ -38,8 +38,13 @@ class Rodney:
         r = self._run("start")
         return {"exit_code": r.returncode, "output": r.stdout.strip(), "stderr": r.stderr.strip()}
 
+    def is_running(self) -> bool:
+        # rodney status exits 0 even with no browser; only the text says which.
+        r = self._run("status")
+        return r.returncode == 0 and r.stdout.startswith("Browser running")
+
     def ensure_started(self) -> None:
-        if self._run("status").returncode != 0:
+        if not self.is_running():
             r = self._run("start")
             if r.returncode != 0:
                 raise RuntimeError(f"rodney start failed: {r.stderr.strip()}")

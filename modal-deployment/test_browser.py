@@ -28,6 +28,12 @@ FAKE = textwrap.dedent(
     if cmd[0] == "screenshot":
         open(cmd[-1], "wb").write(b"\\x89PNG fake")
         print(cmd[-1])
+    elif cmd[0] == "status":
+        # like rodney v0.4.0: exit 0 either way
+        if os.environ.get("FAKE_RUNNING") == "1":
+            print("Browser running (PID 1)")
+        else:
+            print("No active browser session")
     elif cmd[0] == "title":
         print("Fake Title")
     elif cmd[0] == "url":
@@ -50,6 +56,7 @@ def fake(tmp_path, monkeypatch):
     log = tmp_path / "log.jsonl"
     monkeypatch.setenv("FAKE_LOG", str(log))
     monkeypatch.delenv("FAKE_FAIL", raising=False)
+    monkeypatch.delenv("FAKE_RUNNING", raising=False)
 
     def calls():
         if not log.exists():
@@ -143,6 +150,34 @@ def test_run_command_timeout_is_capped(fake, monkeypatch):
     monkeypatch.setattr(r, "_run", spy)
     r.run_command(["status"], timeout=10_000)
     assert seen["timeout"] == MAX_TIMEOUT
+
+
+def test_ensure_started_skips_start_when_running(fake, monkeypatch):
+    r, calls = fake
+    monkeypatch.setenv("FAKE_RUNNING", "1")
+    r.ensure_started()
+    assert [c["args"][1] for c in calls()] == ["status"]
+
+
+def test_ensure_started_starts_when_status_says_no_session(fake):
+    # rodney status exits 0 here, so the exit code alone is not enough
+    r, calls = fake
+    r.ensure_started()
+    assert [c["args"][1] for c in calls()] == ["status", "start"]
+
+
+def test_ensure_started_starts_when_status_fails(fake, monkeypatch):
+    r, calls = fake
+    monkeypatch.setenv("FAKE_FAIL", "status")
+    r.ensure_started()
+    assert [c["args"][1] for c in calls()] == ["status", "start"]
+
+
+def test_ensure_started_raises_when_start_fails(fake, monkeypatch):
+    r, _ = fake
+    monkeypatch.setenv("FAKE_FAIL", "start")
+    with pytest.raises(RuntimeError, match="start failed"):
+        r.ensure_started()
 
 
 def test_home_sets_rodney_home(fake, tmp_path):
