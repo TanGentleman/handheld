@@ -21,6 +21,20 @@ modal setup          # one-time — authenticates with Modal
 
 The script will print your **login URL** and **API token**. Open the login URL on your phone and enter the token.
 
+### Or run it locally first
+
+No Modal account: the same UI and API against Chrome on your machine. Needs
+[Go](https://go.dev/dl/) for rodney.
+
+```bash
+go install github.com/simonw/rodney@v0.4.0   # puts rodney in ~/go/bin
+uv run modal-deployment/local.py             # prints a login token and http://127.0.0.1:8000/
+```
+
+Each agent is its own Chrome. `--host 0.0.0.0` makes it reachable from your phone on the
+same network; that is plain HTTP, so the token travels unencrypted. Without
+`ROD_CHROME_BIN=/path/to/chrome`, rodney downloads its own Chromium on first start.
+
 ### Choose your own password
 
 Don't want to paste a random token on your phone? Set your own:
@@ -105,7 +119,8 @@ Point an HTTP action at your Modal URL with:
 modal app logs rodney
 ```
 
-**Tests** (offline, no Modal account needed): `uv run pytest`
+**Tests** (offline, no Modal account needed): `uv run pytest`. With rodney and Chrome
+installed, `HANDHELD_LIVE=1 uv run pytest -k live` also drives a real browser.
 
 **Detailed setup docs:** See [modal-deployment/SETUP.md](modal-deployment/SETUP.md).
 

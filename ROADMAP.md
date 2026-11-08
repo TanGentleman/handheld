@@ -49,7 +49,9 @@ near-identical `subprocess.run` wrappers inside the Modal class; SETUP.md repeat
   modal 1.6.3 / fastapi 0.162, `uv sync` installs test deps, CI, docs and deploy.sh fixes.
 - `handheld-2` (done): rodney calls move to a plain `browser.Rodney` class; tests against a
   fake `rodney` on disk, plus an opt-in live test; Chrome now starts on container boot.
-- `handheld-3` (planned): `local` mode, the same app on your machine against local Chrome.
+- `handheld-3` (done): `uv run modal-deployment/local.py`, the same app and UI against
+  local Chrome, one rodney session per agent; `create_app` takes the backend; the agent UI
+  shows its first frame on load instead of after 5s.
 - `handheld-4` (planned): one router serves both `/agents/{id}/...` and the default-agent
   routes; fold SETUP.md into the README.
 
@@ -79,5 +81,9 @@ For a stacked branch, use the previous branch as the base: `handheld-1..handheld
   would get mobile sites; your call.
 - No login rate limit. With a long token that is fine; `RODNEY_PASSWORD` now warns under
   12 characters but does not refuse.
+- Local mode serves plain HTTP with a non-Secure cookie, bound to 127.0.0.1 unless you pass
+  `--host`. HTTPS (e.g. behind Tailscale) would be needed before using it over a network.
+- `/` with an empty agent list has no agent to open until you create one or call a flat
+  route (`/status` creates `default`). Unchanged from upstream.
 - `/docs` and `/openapi.json` stay public (they list routes, no data).
 - Delete the stale `security-hardening` and merged branches upstream if you agree.

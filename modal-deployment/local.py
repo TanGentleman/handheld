@@ -2,9 +2,9 @@
 
     uv run modal-deployment/local.py [--host 127.0.0.1] [--port 8000]
 
-Needs rodney on PATH (go install github.com/simonw/rodney@v0.4.0). rodney finds
-Chrome itself; set ROD_CHROME_BIN to pick one. Set RODNEY_API_TOKENS to choose
-the login token; otherwise one is generated and printed.
+Needs rodney on PATH (go install github.com/simonw/rodney@v0.4.0). Set
+ROD_CHROME_BIN to use an installed Chrome; otherwise rodney downloads Chromium.
+Set RODNEY_API_TOKENS to choose the login token; otherwise one is generated.
 """
 
 import argparse
