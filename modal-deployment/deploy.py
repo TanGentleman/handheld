@@ -16,6 +16,7 @@ Prerequisites:
   - modal secret create rodney-auth RODNEY_API_TOKENS=tok1,tok2 RODNEY_COOKIE_SECRET=hex...
 """
 
+import hashlib
 import hmac
 import random
 import string
@@ -256,17 +257,28 @@ def create_app():
     agent_tpl = string.Template((web_dir / "agent.html").read_text(encoding="utf-8"))
     dashboard_html = (web_dir / "dashboard.html").read_text(encoding="utf-8")
 
-    VALID_TOKENS = set(os.environ["RODNEY_API_TOKENS"].split(","))
-    cookie_signer = URLSafeTimedSerializer(os.environ["RODNEY_COOKIE_SECRET"])
+    VALID_TOKENS = {t.strip() for t in os.environ.get("RODNEY_API_TOKENS", "").split(",") if t.strip()}
+    if not VALID_TOKENS:
+        raise RuntimeError("RODNEY_API_TOKENS must contain at least one non-empty token")
+    cookie_secret = os.environ.get("RODNEY_COOKIE_SECRET", "")
+    if not cookie_secret:
+        raise RuntimeError("RODNEY_COOKIE_SECRET must be set")
+    cookie_signer = URLSafeTimedSerializer(cookie_secret)
     COOKIE_NAME = "rodney_session"
     COOKIE_MAX_AGE = 30 * 24 * 3600  # 30 days
 
-    def _token_is_valid(candidate: str) -> bool:
-        """Constant-time check against all valid tokens to prevent timing attacks."""
+    def _digest(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    VALID_DIGESTS = {_digest(t) for t in VALID_TOKENS}
+
+    def _digest_is_valid(candidate: str) -> bool:
+        """Constant-time check against all valid token digests to prevent timing attacks."""
         candidate_b = candidate.encode("utf-8")
-        return any(
-            hmac.compare_digest(candidate_b, valid.encode("utf-8")) for valid in VALID_TOKENS
-        )
+        return any(hmac.compare_digest(candidate_b, d.encode("utf-8")) for d in VALID_DIGESTS)
+
+    def _token_is_valid(candidate: str) -> bool:
+        return _digest_is_valid(_digest(candidate))
 
     def require_auth(request: Request) -> str:
         # Bearer token
@@ -280,9 +292,9 @@ def create_app():
         cookie = request.cookies.get(COOKIE_NAME)
         if cookie:
             try:
-                token = cookie_signer.loads(cookie, max_age=COOKIE_MAX_AGE)
-                if _token_is_valid(token):
-                    return token
+                digest = cookie_signer.loads(cookie, max_age=COOKIE_MAX_AGE)
+                if isinstance(digest, str) and _digest_is_valid(digest):
+                    return digest
             except (BadSignature, SignatureExpired):
                 pass
 
@@ -344,7 +356,8 @@ def create_app():
                 login_tpl.substitute(error='<p class="error">invalid token</p>'),
                 status_code=401,
             )
-        signed = cookie_signer.dumps(token)
+        # The cookie carries a digest, not the token itself (itsdangerous signs but does not encrypt).
+        signed = cookie_signer.dumps(_digest(token))
         response = RedirectResponse(url="/", status_code=303)
         response.set_cookie(
             COOKIE_NAME,
@@ -352,14 +365,14 @@ def create_app():
             max_age=COOKIE_MAX_AGE,
             httponly=True,
             samesite="lax",
-            secure=False,  # Modal terminates TLS at the proxy; ASGI sees HTTP
+            secure=True,  # the browser talks HTTPS to Modal, even though the ASGI app sees HTTP
         )
         return response
 
     @web_app.get("/logout")
     def logout():
         response = RedirectResponse(url="/login", status_code=303)
-        response.delete_cookie(COOKIE_NAME)
+        response.delete_cookie(COOKIE_NAME, httponly=True, samesite="lax", secure=True)
         return response
 
     # --- Agent lifecycle endpoints ---
