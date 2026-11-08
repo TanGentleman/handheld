@@ -14,7 +14,7 @@ Handheld deploys a headless Chromium instance on [Modal](https://modal.com) and 
 ```bash
 git clone https://github.com/TanGentleman/handheld.git
 cd handheld
-uv sync              # install dependencies
+uv sync              # install dependencies (and the test tools)
 modal setup          # one-time — authenticates with Modal
 ./modal-deployment/deploy.sh  # deploys and prints your URL + token
 ```
@@ -26,7 +26,7 @@ The script will print your **login URL** and **API token**. Open the login URL o
 Don't want to paste a random token on your phone? Set your own:
 
 ```bash
-RODNEY_PASSWORD=mypassword ./deploy.sh
+RODNEY_PASSWORD=a-long-passphrase ./modal-deployment/deploy.sh
 ```
 
 Your token is saved to `modal-deployment/.env` so you can always recover it.
@@ -57,26 +57,36 @@ After logging in, the root URL (`/`) gives you a full browser interface with:
 
 ### API Endpoints
 
-All endpoints require auth (`Authorization: Bearer <token>` header or session cookie).
+Everything except `/login`, `/docs` and `/openapi.json` requires auth
+(`Authorization: Bearer <token>` header or the session cookie set by `/login`).
 
-| Method | Endpoint      | Description                        |
-|--------|---------------|------------------------------------|
-| POST   | `/open`       | Navigate (`?url=https://...`)      |
-| GET    | `/screenshot` | Returns PNG                        |
-| GET    | `/title`      | Current page title                 |
-| GET    | `/url`        | Current page URL                   |
-| POST   | `/js`         | Run JavaScript (`?expression=...`) |
-| POST   | `/run`        | Universal command (JSON body)      |
-| GET    | `/status`     | Chrome/rodney status               |
-| GET    | `/docs`       | Interactive Swagger UI             |
+These act on the `default` agent. The same routes exist per agent under
+`/agents/{agent_id}/...`.
+
+| Method | Endpoint      | Description                          |
+|--------|---------------|--------------------------------------|
+| POST   | `/open`       | Navigate (`?url=https://...`)        |
+| GET    | `/screenshot` | PNG of the 1280x720 viewport         |
+| GET    | `/title`      | Current page title                   |
+| GET    | `/url`        | Current page URL                     |
+| POST   | `/js`         | Run JavaScript (`?expression=...`)   |
+| POST   | `/click`      | Click at viewport pixel (`?x=&y=`)   |
+| POST   | `/scroll`     | Scroll by (`?dx=&dy=`)               |
+| GET    | `/viewport`   | Window size                          |
+| POST   | `/run`        | Any rodney command (JSON body)       |
+| GET    | `/status`     | Chrome/rodney status                 |
+| GET    | `/docs`       | Interactive Swagger UI (public)      |
+
+Agents: `POST /agents` creates one (its own container and Chromium),
+`GET /agents` lists them, `DELETE /agents/{agent_id}` removes it from the list.
 
 ### The `/run` endpoint
 
-Send any rodney command as JSON:
+Send any [rodney command](https://github.com/simonw/rodney#usage) as JSON:
 
 ```json
 {"args": ["click", "#submit-button"], "timeout": 10}
-{"args": ["type", "#search", "hello world"]}
+{"args": ["input", "#search", "hello world"]}
 {"args": ["text", "h1"]}
 ```
 
@@ -88,12 +98,14 @@ Point an HTTP action at your Modal URL with:
 
 ## Troubleshooting
 
-**Slow first request** — If `min_containers=1` in `deploy.py`, one container stays warm. Set to 0 to save money (adds ~10-15s cold start).
+**Slow first request**: containers shut down after 5 minutes idle (`scaledown_window=300` in `deploy.py`), so the next request cold-starts Chromium. Add `min_containers=1` to the `@app.function` and `@app.cls` decorators to keep one warm, at the cost of paying for it.
 
 **Check logs:**
 ```bash
 modal app logs rodney
 ```
+
+**Tests** (offline, no Modal account needed): `uv run pytest`
 
 **Detailed setup docs:** See [modal-deployment/SETUP.md](modal-deployment/SETUP.md).
 

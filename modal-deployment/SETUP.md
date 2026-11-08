@@ -13,9 +13,9 @@ A Modal container running:
 You'll be able to do things like:
 
 ```
-curl https://your-username--rodney-api.modal.run/open?url=https://news.ycombinator.com
-curl https://your-username--rodney-api.modal.run/screenshot -o page.png
-curl https://your-username--rodney-api.modal.run/title
+curl -H "Authorization: Bearer $TOKEN" -X POST "https://your-username--rodney-api.modal.run/open?url=https://news.ycombinator.com"
+curl -H "Authorization: Bearer $TOKEN" https://your-username--rodney-api.modal.run/screenshot -o page.png
+curl -H "Authorization: Bearer $TOKEN" https://your-username--rodney-api.modal.run/title
 ```
 
 Modal gives you a public HTTPS URL with token auth, and a Swagger UI at
@@ -33,14 +33,16 @@ Modal gives you a public HTTPS URL with token auth, and a Swagger UI at
 
 ## Step 1: Install the Modal CLI
 
+From the repo root (installs Modal into `.venv`):
+
 ```bash
-pip install modal
+uv sync
 ```
 
 Then authenticate — this opens a browser window:
 
 ```bash
-modal setup
+uv run modal setup
 ```
 
 You should see `Modal token stored successfully` when done.
@@ -53,7 +55,9 @@ modal secret create rodney-auth \
   RODNEY_COOKIE_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 ```
 
-Or just run `./deploy.sh` — it auto-generates tokens if the secret doesn't exist yet.
+Or just run `./deploy.sh`: it generates a token on the first run (or uses
+`RODNEY_PASSWORD`), reuses the one in `modal-deployment/.env` after that,
+and recreates the secret with a fresh cookie secret on every run.
 
 ## Step 3: Deploy
 
@@ -73,7 +77,7 @@ modal deploy deploy.py
 ```
 
 The first deploy takes a few minutes to build the image (installs Chromium,
-compiles rodney from source, etc). Subsequent deploys reuse cached layers
+builds rodney from source with Go). Subsequent deploys reuse cached layers
 and are much faster.
 
 Modal will print a URL like:
@@ -108,7 +112,7 @@ Or log in via the browser at `/login` with your token to get a session cookie.
 | Method | Endpoint      | Description                        |
 | ------ | ------------- | ---------------------------------- |
 | GET    | `/status`     | Chrome/rodney status               |
-| GET    | `/screenshot` | Returns a PNG image                |
+| GET    | `/screenshot` | PNG of the 1280x720 viewport       |
 | GET    | `/url`        | Current page URL                   |
 | GET    | `/title`      | Current page title                 |
 | POST   | `/open`       | Navigate (query param: `url=...`)  |
@@ -164,9 +168,9 @@ Point HTTP actions at `/run` with a JSON body.
 
 **Container keeps spinning down**
 
-- The `min_containers=1` setting keeps one container alive. If cost is a
-  concern, set it to 0 — the container will cold-start on each request
-  (adds ~10-15s latency)
+- That is the default: containers stop after 5 minutes idle
+  (`scaledown_window=300`). Add `min_containers=1` to the decorators in
+  `deploy.py` to keep one running, at the cost of paying for it.
 
 **Checking logs**
 
