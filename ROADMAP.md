@@ -62,25 +62,6 @@ near-identical `subprocess.run` wrappers inside the Modal class; SETUP.md repeat
   start first, env var table, boundaries.
 - `handheld-6`: README cut to 79 words; details moved to IMPLEMENTATION.md.
 
-## Apply upstream
-
-```bash
-# in kranti-sandbox
-git fetch origin
-base=$(git log -1 --format=%H --grep='^Import handheld upstream' origin/handheld-1)
-git format-patch --relative=handheld "$base"..origin/handheld-6 -o /tmp/handheld
-# in a clean upstream clone at 63094f0
-git clone https://github.com/TanGentleman/handheld && cd handheld
-git am /tmp/handheld/*.patch
-uv sync --locked && uv run pytest && bash -n modal-deployment/deploy.sh
-# optional, needs rodney on PATH and Chrome
-HANDHELD_LIVE=1 ROD_CHROME_BIN=/path/to/chrome uv run pytest -k live
-```
-
-For one branch, use `origin/handheld-(N-1)..origin/handheld-N`. `handheld-x-login-limit` is a
-side branch on top of `-4`, not part of this stack; it edits README and ROADMAP too, so it
-needs a rebase onto `-5` if kept.
-
 ## Needs Tan
 
 - Not deployed: the pinned image (Go 1.27.3, rodney v0.4.0, Debian `chromium`, Python 3.12)
