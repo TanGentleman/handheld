@@ -20,10 +20,11 @@ import hashlib
 import hmac
 import random
 import string
-import subprocess
 from pathlib import Path
 
 import modal
+
+from browser import Rodney
 
 # Directory containing this file (used for Modal image mounts and local pytest).
 _DEPLOY_ROOT = Path(__file__).resolve().parent
@@ -66,6 +67,7 @@ rodney_image = (
             "HANDHELD_WEB_DIR": _HANDHELD_WEB_MOUNT,
         }
     )
+    .add_local_python_source("browser")
 )
 
 app = modal.App("rodney", image=rodney_image)
@@ -73,9 +75,6 @@ app = modal.App("rodney", image=rodney_image)
 # --- Agent registry (shared state across containers) ---
 
 agent_registry = modal.Dict.from_name("rodney-agents", create_if_missing=True)
-
-SCREEN_WIDTH = 1280
-SCREEN_HEIGHT = 720
 
 DEFAULT_AGENT_ID = "default"
 AGENT_ID_LENGTH = 6
@@ -94,157 +93,59 @@ def _generate_agent_id() -> str:
     scaledown_window=300,
 )
 class BrowserAgent:
+    """Thin Modal wrapper: the rodney calls live in browser.Rodney."""
+
     # Each distinct agent_id gets its own container / Chromium (Modal parametrized cls).
     agent_id: str = modal.parameter()
 
     @modal.enter()
     def start_chrome(self):
-        """Start Chromium via rodney on container boot."""
-        result = subprocess.run(
-            ["rodney", "status"], capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            subprocess.run(
-                ["rodney", "start", "--global"],
-                capture_output=True, text=True, check=True,
-            )
+        self.browser = Rodney()
+        self.browser.ensure_started()
 
     @modal.exit()
     def stop_chrome(self):
-        """Kill Chrome on container shutdown."""
-        subprocess.run(
-            ["rodney", "--global", "stop"],
-            capture_output=True, text=True,
-        )
+        self.browser.stop()
 
     @modal.method()
     def status(self) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "status"],
-            capture_output=True, text=True,
-        )
-        return {"exit_code": result.returncode, "output": result.stdout.strip()}
+        return self.browser.status()
 
     @modal.method()
     def screenshot(self) -> dict:
-        import os
-        shot_path = "/tmp/shot.png"
-        result = subprocess.run(
-            # -w/-h capture the viewport; without -h rodney captures the full page,
-            # which breaks tap-to-click coordinates and scrolling in the UI.
-            ["rodney", "--global", "screenshot",
-             "-w", str(SCREEN_WIDTH), "-h", str(SCREEN_HEIGHT), shot_path],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            return {"error": result.stderr.strip()}
-        with open(shot_path, "rb") as f:
-            png = f.read()
-        os.remove(shot_path)
-        return {"png": png}
+        return self.browser.screenshot()
 
     @modal.method()
     def get_url(self) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "url"],
-            capture_output=True, text=True,
-        )
-        return {"url": result.stdout.strip(), "exit_code": result.returncode}
+        return self.browser.get_url()
 
     @modal.method()
     def get_title(self) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "title"],
-            capture_output=True, text=True,
-        )
-        return {"title": result.stdout.strip(), "exit_code": result.returncode}
+        return self.browser.get_title()
 
     @modal.method()
     def open_url(self, url: str) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "open", url],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            # e.g. user ran `rodney stop` — same start as @modal.enter
-            subprocess.run(
-                ["rodney", "start", "--global"],
-                capture_output=True, text=True,
-            )
-            result = subprocess.run(
-                ["rodney", "--global", "open", url],
-                capture_output=True, text=True,
-            )
-        return {"exit_code": result.returncode, "stderr": result.stderr.strip()}
+        return self.browser.open_url(url)
 
     @modal.method()
     def run_js(self, expression: str) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "js", expression],
-            capture_output=True, text=True,
-        )
-        return {
-            "result": result.stdout.strip(),
-            "exit_code": result.returncode,
-            "stderr": result.stderr.strip(),
-        }
+        return self.browser.run_js(expression)
 
     @modal.method()
     def click(self, x: int, y: int) -> dict:
-        js_code = f"""(function(){{
-            var el=document.elementFromPoint({x},{y});
-            if(!el) return 'no element';
-            el.dispatchEvent(new MouseEvent('mouseover',{{bubbles:true,clientX:{x},clientY:{y}}}));
-            el.dispatchEvent(new MouseEvent('mousedown',{{bubbles:true,clientX:{x},clientY:{y}}}));
-            el.dispatchEvent(new MouseEvent('mouseup',{{bubbles:true,clientX:{x},clientY:{y}}}));
-            el.dispatchEvent(new MouseEvent('click',{{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}}));
-            return el.tagName+(el.id?'#'+el.id:'');
-        }})()"""
-        result = subprocess.run(
-            ["rodney", "--global", "js", js_code],
-            capture_output=True, text=True,
-        )
-        return {"exit_code": result.returncode, "clicked": result.stdout.strip()}
+        return self.browser.click(x, y)
 
     @modal.method()
     def scroll(self, dx: int, dy: int) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "js", f"window.scrollBy({dx},{dy})"],
-            capture_output=True, text=True,
-        )
-        return {"exit_code": result.returncode}
+        return self.browser.scroll(dx, dy)
 
     @modal.method()
     def viewport(self) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "js",
-             "JSON.stringify({w:window.innerWidth,h:window.innerHeight})"],
-            capture_output=True, text=True,
-        )
-        return {"exit_code": result.returncode, "viewport": result.stdout.strip()}
+        return self.browser.viewport()
 
     @modal.method()
     def run_command(self, args: list[str], timeout: int = 30) -> dict:
-        import base64
-        MAX_TIMEOUT = 120
-        result = subprocess.run(
-            ["rodney", "--global"] + args,
-            capture_output=True,
-            timeout=min(timeout, MAX_TIMEOUT),
-        )
-        stdout = result.stdout
-        is_binary = False
-        try:
-            stdout_str = stdout.decode("utf-8")
-        except UnicodeDecodeError:
-            stdout_str = base64.b64encode(stdout).decode("ascii")
-            is_binary = True
-        return {
-            "exit_code": result.returncode,
-            "stdout": stdout_str,
-            "stderr": result.stderr.decode("utf-8", errors="replace"),
-            "is_binary": is_binary,
-        }
+        return self.browser.run_command(args, timeout)
 
 
 # HTML templates: `web/login.html`, `web/dashboard.html`, `web/agent.html` (loaded in `create_app`).
