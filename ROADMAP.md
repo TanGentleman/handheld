@@ -8,9 +8,8 @@ Shortcut.
 
 ## Status (upstream main 63094f0, checked 2026-11-08)
 
-- `uv sync --extra test && cd modal-deployment && uv run pytest`: 35 passed, offline. The
-  tests fake `BrowserAgent` and the `modal.Dict`; `import deploy` needs no Modal credentials.
-- Not checked: a real Modal deploy (no account). The Modal API calls import cleanly on 1.6.3.
+- Tests are offline: they fake `BrowserAgent` and the `modal.Dict`; `import deploy` needs no
+  Modal credentials. A real Modal deploy was not checked (no account).
 - Fail-open auth: an empty entry in `RODNEY_API_TOKENS` (`"tok,,"`, or `""`) made
   `Authorization: Bearer ` a valid credential (reproduced: 200 on `/status`).
 - The session cookie carried the raw token (signed, not encrypted) and was not `Secure`.
@@ -55,27 +54,37 @@ near-identical `subprocess.run` wrappers inside the Modal class; SETUP.md repeat
 - `handheld-4` (done): the browser routes are registered once for both `/agents/{id}/...`
   and the default agent (pinned first by `test_routes.py`); SETUP.md and the
   `modal-deployment/README.md` pointer are folded into the README.
+- `handheld-5`: fastapi 0.162.2 (lock and image), Go 1.27.3 in the image, dependency floors
+  pinned to the locked releases (modal 1.6.3, httpx 0.28.1, itsdangerous 2.2.0, pytest 9.2.0).
+  rodney v0.4.0 builds with Go 1.27.3 and the live tests pass with it against local Chrome.
+  CI pins checkout v7.0.1 and setup-uv v10.3.3 by SHA, uv 0.13.7, ubuntu-24.04, Python 3.10
+  and 3.14. `test_pins.py` keeps the image pins equal to `uv.lock`. README rewrite: local quick
+  start first, env var table, boundaries.
 
-## Apply a branch upstream
+## Apply upstream
 
 ```bash
 # in kranti-sandbox
+git fetch origin
 base=$(git log -1 --format=%H --grep='^Import handheld upstream' origin/handheld-1)
-git format-patch --relative=handheld "$base"..origin/handheld-1 -o /tmp/handheld-1
+git format-patch --relative=handheld "$base"..origin/handheld-5 -o /tmp/handheld
 # in a clean upstream clone at 63094f0
 git clone https://github.com/TanGentleman/handheld && cd handheld
-git am /tmp/handheld-1/*.patch
-uv sync --locked && uv run pytest
+git am /tmp/handheld/*.patch
+uv sync --locked && uv run pytest && bash -n modal-deployment/deploy.sh
 # optional, needs rodney on PATH and Chrome
 HANDHELD_LIVE=1 ROD_CHROME_BIN=/path/to/chrome uv run pytest -k live
 ```
 
-For a stacked branch, use the previous branch as the base: `origin/handheld-1..origin/handheld-2`.
+For one branch, use `origin/handheld-(N-1)..origin/handheld-N`. `handheld-x-login-limit` is a
+side branch on top of `-4`, not part of this stack; it edits README and ROADMAP too, so it
+needs a rebase onto `-5` if kept.
 
 ## Needs Tan
 
-- Not deployed: the pinned image (Go 1.26.10, rodney v0.4.0, Debian `chromium`) and modal
-  1.6.3 were checked locally only. Run `./modal-deployment/deploy.sh` once.
+- Not deployed: the pinned image (Go 1.27.3, rodney v0.4.0, Debian `chromium`, Python 3.12)
+  and modal 1.6.3 were checked locally only. Run `./modal-deployment/deploy.sh` once. The
+  image's Python stays 3.12 until a deploy can check a newer one.
 - Deploying logs everyone out once (cookie format changed; deploy.sh rotates the secret
   anyway).
 - Screenshot size is fixed at 1280x720 (rodney's default width). A phone-sized viewport
