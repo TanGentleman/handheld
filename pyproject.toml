@@ -10,11 +10,11 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "modal>=1.6",
+    "modal>=1.6.3",
 ]
 
 [dependency-groups]
-dev = ["pytest>=9", "httpx>=0.28", "itsdangerous>=2.2", "fastapi[standard]>=0.160"]
+dev = ["pytest>=9.2.0", "httpx>=0.28.1", "itsdangerous>=2.2.0", "fastapi[standard]>=0.162.2"]
 
 [tool.pytest.ini_options]
 testpaths = ["modal-deployment"]

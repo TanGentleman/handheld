@@ -34,7 +34,7 @@ _HANDHELD_WEB_MOUNT = "/opt/handheld-web"
 # --- Image ---
 
 # rodney v0.4.0 needs Go >= 1.24.7. Bump both deliberately; rodney's CLI changes often.
-GO_VERSION = "1.26.10"
+GO_VERSION = "1.27.3"
 RODNEY_VERSION = "v0.4.0"
 
 rodney_image = (
@@ -53,7 +53,7 @@ rodney_image = (
         "GOPATH=/root/go CGO_ENABLED=0 /usr/local/go/bin/go install -ldflags='-s -w' "
         f"github.com/simonw/rodney@{RODNEY_VERSION}",
     )
-    .uv_pip_install("fastapi[standard]==0.162.0", "itsdangerous==2.2.0")
+    .uv_pip_install("fastapi[standard]==0.162.2", "itsdangerous==2.2.0")
     .add_local_dir(
         _DEPLOY_ROOT / "web",
         remote_path=_HANDHELD_WEB_MOUNT,
