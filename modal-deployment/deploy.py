@@ -378,133 +378,73 @@ def create_app(backend=None, secure_cookie: bool = True):
         backend.forget(agent_id)
         return {"deleted": agent_id}
 
-    # --- Scoped agent endpoints ---
+    # --- Browser endpoints: once per agent, once more for the default agent ---
 
     class RodneyCommand(BaseModel):
         args: list[str]
         timeout: int = 30
 
-    @web_app.post("/agents/{agent_id}/run")
-    def agent_run(agent_id: str, cmd: RodneyCommand, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        if not cmd.args:
-            raise HTTPException(status_code=422, detail="args must not be empty")
-        return agent.run_command(cmd.args, cmd.timeout)
+    # Both depend on require_auth so an unauthenticated request never reaches the backend.
+    def scoped_agent(agent_id: str, _token: str = Depends(require_auth)):
+        return _get_agent(agent_id)
 
-    @web_app.get("/agents/{agent_id}/status")
-    def agent_status(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.status()
+    def default_agent(_token: str = Depends(require_auth)):
+        return _get_agent(_get_or_create_default())
 
-    @web_app.get("/agents/{agent_id}/screenshot")
-    def agent_screenshot(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        result = agent.screenshot()
-        if "error" in result:
-            return Response(
-                content=json.dumps({"error": result["error"]}),
-                media_type="application/json",
-                status_code=500,
-            )
-        return Response(content=result["png"], media_type="image/png")
+    def add_browser_routes(prefix: str, agent_dep) -> None:
+        Agent = Depends(agent_dep)
 
-    @web_app.get("/agents/{agent_id}/url")
-    def agent_url(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.get_url()
+        @web_app.post(prefix + "/run")
+        def run(cmd: RodneyCommand, agent=Agent):
+            if not cmd.args:
+                raise HTTPException(status_code=422, detail="args must not be empty")
+            return agent.run_command(cmd.args, cmd.timeout)
 
-    @web_app.get("/agents/{agent_id}/title")
-    def agent_title(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.get_title()
+        @web_app.get(prefix + "/status")
+        def status(agent=Agent):
+            return agent.status()
 
-    @web_app.post("/agents/{agent_id}/open")
-    def agent_open(agent_id: str, url: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.open_url(url)
+        @web_app.get(prefix + "/screenshot")
+        def screenshot(agent=Agent):
+            result = agent.screenshot()
+            if "error" in result:
+                return Response(
+                    content=json.dumps({"error": result["error"]}),
+                    media_type="application/json",
+                    status_code=500,
+                )
+            return Response(content=result["png"], media_type="image/png")
 
-    @web_app.post("/agents/{agent_id}/js")
-    def agent_js(agent_id: str, expression: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.run_js(expression)
+        @web_app.get(prefix + "/url")
+        def url(agent=Agent):
+            return agent.get_url()
 
-    @web_app.post("/agents/{agent_id}/click")
-    def agent_click(agent_id: str, x: int, y: int, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.click(x, y)
+        @web_app.get(prefix + "/title")
+        def title(agent=Agent):
+            return agent.get_title()
 
-    @web_app.post("/agents/{agent_id}/scroll")
-    def agent_scroll(agent_id: str, dx: int = 0, dy: int = 0, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.scroll(dx, dy)
+        @web_app.post(prefix + "/open")
+        def open_url(url: str, agent=Agent):
+            return agent.open_url(url)
 
-    @web_app.get("/agents/{agent_id}/viewport")
-    def agent_viewport(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.viewport()
+        @web_app.post(prefix + "/js")
+        def js(expression: str, agent=Agent):
+            return agent.run_js(expression)
 
-    # --- Flat endpoints (aliases to default agent) ---
+        @web_app.post(prefix + "/click")
+        def click(x: int, y: int, agent=Agent):
+            return agent.click(x, y)
 
-    @web_app.post("/run")
-    def run_command(cmd: RodneyCommand, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        agent = _get_agent(aid)
-        if not cmd.args:
-            raise HTTPException(status_code=422, detail="args must not be empty")
-        return agent.run_command(cmd.args, cmd.timeout)
+        @web_app.post(prefix + "/scroll")
+        def scroll(dx: int = 0, dy: int = 0, agent=Agent):
+            return agent.scroll(dx, dy)
 
-    @web_app.get("/status")
-    def status(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).status()
+        @web_app.get(prefix + "/viewport")
+        def viewport(agent=Agent):
+            return agent.viewport()
 
-    @web_app.get("/screenshot")
-    def screenshot(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        agent = _get_agent(aid)
-        result = agent.screenshot()
-        if "error" in result:
-            return Response(
-                content=json.dumps({"error": result["error"]}),
-                media_type="application/json",
-                status_code=500,
-            )
-        return Response(content=result["png"], media_type="image/png")
-
-    @web_app.get("/url")
-    def get_url(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).get_url()
-
-    @web_app.get("/title")
-    def title(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).get_title()
-
-    @web_app.post("/open")
-    def open_url(url: str, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).open_url(url)
-
-    @web_app.post("/js")
-    def run_js(expression: str, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).run_js(expression)
-
-    @web_app.post("/click")
-    def click_at(x: int, y: int, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).click(x, y)
-
-    @web_app.post("/scroll")
-    def scroll(dx: int = 0, dy: int = 0, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).scroll(dx, dy)
-
-    @web_app.get("/viewport")
-    def viewport(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).viewport()
+    add_browser_routes("/agents/{agent_id}", scoped_agent)
+    add_browser_routes("", default_agent)
 
     return web_app
 
