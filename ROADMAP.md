@@ -60,8 +60,8 @@ near-identical `subprocess.run` wrappers inside the Modal class; SETUP.md repeat
 
 ```bash
 # in kranti-sandbox
-base=$(git log -1 --format=%H --grep='^Import handheld upstream' handheld-1)
-git format-patch --relative=handheld "$base"..handheld-1 -o /tmp/handheld-1
+base=$(git log -1 --format=%H --grep='^Import handheld upstream' origin/handheld-1)
+git format-patch --relative=handheld "$base"..origin/handheld-1 -o /tmp/handheld-1
 # in a clean upstream clone at 63094f0
 git clone https://github.com/TanGentleman/handheld && cd handheld
 git am /tmp/handheld-1/*.patch
@@ -70,7 +70,7 @@ uv sync --locked && uv run pytest
 HANDHELD_LIVE=1 ROD_CHROME_BIN=/path/to/chrome uv run pytest -k live
 ```
 
-For a stacked branch, use the previous branch as the base: `handheld-1..handheld-2`.
+For a stacked branch, use the previous branch as the base: `origin/handheld-1..origin/handheld-2`.
 
 ## Needs Tan
 
@@ -86,5 +86,5 @@ For a stacked branch, use the previous branch as the base: `handheld-1..handheld
   `--host`. HTTPS (e.g. behind Tailscale) would be needed before using it over a network.
 - `/` with an empty agent list has no agent to open until you create one or call a flat
   route (`/status` creates `default`). Unchanged from upstream.
-- `/docs` and `/openapi.json` stay public (they list routes, no data).
+- `/docs`, `/redoc` and `/openapi.json` stay public (they list routes, no data).
 - Delete the stale `security-hardening` and merged branches upstream if you agree.

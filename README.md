@@ -82,7 +82,7 @@ After logging in, the root URL (`/`) gives you a full browser interface with:
 
 ### API Endpoints
 
-Everything except `/login`, `/docs` and `/openapi.json` requires auth
+Everything except `/login`, `/logout`, `/docs`, `/redoc` and `/openapi.json` requires auth
 (`Authorization: Bearer <token>` header or the session cookie set by `/login`).
 
 These act on the `default` agent. The same routes exist per agent under
