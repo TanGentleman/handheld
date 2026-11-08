@@ -17,6 +17,9 @@ Shortcut.
 - `rodney screenshot FILE` without `-h` is a full-page capture (1265x11134 on a Wikipedia
   article), so the phone UI showed the whole page, scroll did nothing visible and taps
   landed at the wrong y.
+- Chrome never started on container boot: `rodney status` exits 0 with "No active browser
+  session", so the exit-code check skipped `rodney start`. Screenshots failed until an `open`
+  restarted Chrome as a side effect (reproduced with rodney v0.4.0 locally).
 - The type drawer and the README sent `rodney type`, which does not exist (`input` does).
 - Image: `rodney@latest` built with Go 1.24.4, but rodney needs Go >= 1.24.7; Go 1.24 and
   1.25 are out of support. fastapi/itsdangerous unpinned in the image.
@@ -44,8 +47,8 @@ near-identical `subprocess.run` wrappers inside the Modal class; SETUP.md repeat
 - `handheld-1` (done): auth fails closed on empty tokens, digest-only Secure cookie,
   viewport screenshots and `input` in the type drawer, Go 1.26.10 + rodney v0.4.0 pinned,
   modal 1.6.3 / fastapi 0.162, `uv sync` installs test deps, CI, docs and deploy.sh fixes.
-- `handheld-2` (planned): pull the rodney calls out of the Modal class into a plain `Rodney`
-  driver; test its argv and error handling with a fake `rodney` on PATH.
+- `handheld-2` (done): rodney calls move to a plain `browser.Rodney` class; tests against a
+  fake `rodney` on disk, plus an opt-in live test; Chrome now starts on container boot.
 - `handheld-3` (planned): `local` mode, the same app on your machine against local Chrome.
 - `handheld-4` (planned): one router serves both `/agents/{id}/...` and the default-agent
   routes; fold SETUP.md into the README.
@@ -60,6 +63,8 @@ git format-patch --relative=handheld "$base"..handheld-1 -o /tmp/handheld-1
 git clone https://github.com/TanGentleman/handheld && cd handheld
 git am /tmp/handheld-1/*.patch
 uv sync --locked && uv run pytest
+# optional, needs rodney on PATH and Chrome
+HANDHELD_LIVE=1 ROD_CHROME_BIN=/path/to/chrome uv run pytest -k live
 ```
 
 For a stacked branch, use the previous branch as the base: `handheld-1..handheld-2`.
