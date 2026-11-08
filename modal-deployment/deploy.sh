@@ -19,16 +19,13 @@ uv sync --project "$REPO_ROOT"
 
 # --- Modal auth ---
 
-if ! uv run modal profile current &>/dev/null; then
+# `modal profile current` exits 0 even without credentials; `token info` does not.
+if ! uv run modal token info &>/dev/null; then
   echo "error: not logged into modal — run 'modal setup' first"
   exit 1
 fi
 
 # --- Secrets ---
-
-secret_exists() {
-  uv run modal secret list 2>/dev/null | grep -q "$1"
-}
 
 # Determine the API token:
 #   1. RODNEY_PASSWORD env var (user-chosen, easy to type on phone)
@@ -37,6 +34,9 @@ secret_exists() {
 if [ -n "${RODNEY_PASSWORD:-}" ]; then
   api_token="$RODNEY_PASSWORD"
   echo ":: using RODNEY_PASSWORD as API token"
+  if [ "${#api_token}" -lt 12 ]; then
+    echo "warning: RODNEY_PASSWORD is shorter than 12 characters; it guards a full browser on a public URL"
+  fi
 elif [ -f "$ENV_FILE" ] && grep -q '^RODNEY_API_TOKEN=' "$ENV_FILE"; then
   api_token=$(grep '^RODNEY_API_TOKEN=' "$ENV_FILE" | cut -d= -f2-)
   echo ":: reusing token from .env"
@@ -53,7 +53,8 @@ uv run modal secret create rodney-auth \
   "RODNEY_COOKIE_SECRET=${cookie_secret}" \
   --force
 
-# Persist token locally for recovery
+# Persist token locally for recovery (owner-readable only)
+umask 077
 echo "RODNEY_API_TOKEN=${api_token}" > "$ENV_FILE"
 
 # --- Deploy ---
@@ -78,7 +79,7 @@ echo "  token:      ${api_token}"
 echo "  saved to:   ${ENV_FILE}"
 echo ""
 echo "  logs:       modal app logs rodney"
-echo "  dashboard:  https://modal.com/apps/deployed/rodney"
+echo "  dashboard:  https://modal.com/apps"
 echo "========================================="
 
 # Print QR code if qrencode is available
