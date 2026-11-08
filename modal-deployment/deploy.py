@@ -148,12 +148,38 @@ class BrowserAgent:
         return self.browser.run_command(args, timeout)
 
 
+class _Remote:
+    """Call a Modal cls instance's methods like plain methods: agent.status() -> .status.remote()."""
+
+    def __init__(self, obj):
+        self._obj = obj
+
+    def __getattr__(self, name):
+        return getattr(self._obj, name).remote
+
+
+class ModalBackend:
+    """One Modal container per agent; the registry is a modal.Dict shared across containers."""
+
+    @property
+    def registry(self):
+        return agent_registry
+
+    def agent(self, agent_id: str):
+        return _Remote(BrowserAgent(agent_id=agent_id))
+
+    def forget(self, agent_id: str) -> None:
+        pass  # the container scales down on its own
+
+
 # HTML templates: `web/login.html`, `web/dashboard.html`, `web/agent.html` (loaded in `create_app`).
 
 # --- App factory (importable by tests) ---
 
 
-def create_app():
+def create_app(backend=None, secure_cookie: bool = True):
+    """Build the FastAPI app. `backend` supplies the agent registry and browsers
+    (ModalBackend by default; local.py passes a LocalBackend)."""
     import json
     import os
     from datetime import datetime, timezone
@@ -212,24 +238,27 @@ def create_app():
 
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    backend = backend or ModalBackend()
+    registry = backend.registry
+
     web_app = FastAPI(title="Handheld", docs_url="/docs")
 
     # --- Helper: get or create agent instance ---
 
-    def _get_agent(agent_id: str) -> BrowserAgent:
+    def _get_agent(agent_id: str):
         """Look up an agent by ID. Raises 404 if not registered."""
         try:
-            agent_registry[agent_id]
+            registry[agent_id]
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-        return BrowserAgent(agent_id=agent_id)
+        return backend.agent(agent_id)
 
     def _get_or_create_default() -> str:
         """Ensure the default agent exists, return its ID."""
         try:
-            agent_registry[DEFAULT_AGENT_ID]
+            registry[DEFAULT_AGENT_ID]
         except KeyError:
-            agent_registry[DEFAULT_AGENT_ID] = {
+            registry[DEFAULT_AGENT_ID] = {
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "purpose": "default",
                 "status": "active",
@@ -277,14 +306,14 @@ def create_app():
             max_age=COOKIE_MAX_AGE,
             httponly=True,
             samesite="lax",
-            secure=True,  # the browser talks HTTPS to Modal, even though the ASGI app sees HTTP
+            secure=secure_cookie,  # Modal serves HTTPS even though the ASGI app sees HTTP
         )
         return response
 
     @web_app.get("/logout")
     def logout():
         response = RedirectResponse(url="/login", status_code=303)
-        response.delete_cookie(COOKIE_NAME, httponly=True, samesite="lax", secure=True)
+        response.delete_cookie(COOKIE_NAME, httponly=True, samesite="lax", secure=secure_cookie)
         return response
 
     # --- Agent lifecycle endpoints ---
@@ -298,15 +327,14 @@ def create_app():
         _token: str = Depends(require_auth),
     ):
         agent_id = _generate_agent_id()
-        agent_registry[agent_id] = {
+        registry[agent_id] = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "purpose": body.purpose,
             "status": "active",
         }
-        # Warm this agent's container (distinct pool per agent_id)
-        agent = BrowserAgent(agent_id=agent_id)
+        # Start this agent's browser now (on Modal: warm its container)
         try:
-            agent.status.remote()
+            backend.agent(agent_id).status()
         except Exception:
             pass
         return {"agent_id": agent_id}
@@ -314,8 +342,8 @@ def create_app():
     @web_app.get("/agents")
     def list_agents(_token: str = Depends(require_auth)):
         agents = []
-        for key in list(agent_registry.keys()):
-            info = agent_registry[key]
+        for key in list(registry.keys()):
+            info = registry[key]
             agents.append({"id": key, **info})
         return agents
 
@@ -323,8 +351,8 @@ def create_app():
     def agents_summary(_token: str = Depends(require_auth)):
         """Lightweight summary of all agents for mobile polling."""
         agents = []
-        for key in list(agent_registry.keys()):
-            info = agent_registry[key]
+        for key in list(registry.keys()):
+            info = registry[key]
             agents.append({
                 "id": key,
                 "status": info.get("status", "unknown"),
@@ -336,7 +364,7 @@ def create_app():
     @web_app.get("/agents/{agent_id}")
     def get_agent_info(agent_id: str, _token: str = Depends(require_auth)):
         try:
-            info = agent_registry[agent_id]
+            info = registry[agent_id]
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         return {"id": agent_id, **info}
@@ -344,9 +372,10 @@ def create_app():
     @web_app.delete("/agents/{agent_id}")
     def delete_agent(agent_id: str, _token: str = Depends(require_auth)):
         try:
-            del agent_registry[agent_id]
+            del registry[agent_id]
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        backend.forget(agent_id)
         return {"deleted": agent_id}
 
     # --- Scoped agent endpoints ---
@@ -360,17 +389,17 @@ def create_app():
         agent = _get_agent(agent_id)
         if not cmd.args:
             raise HTTPException(status_code=422, detail="args must not be empty")
-        return agent.run_command.remote(cmd.args, cmd.timeout)
+        return agent.run_command(cmd.args, cmd.timeout)
 
     @web_app.get("/agents/{agent_id}/status")
     def agent_status(agent_id: str, _token: str = Depends(require_auth)):
         agent = _get_agent(agent_id)
-        return agent.status.remote()
+        return agent.status()
 
     @web_app.get("/agents/{agent_id}/screenshot")
     def agent_screenshot(agent_id: str, _token: str = Depends(require_auth)):
         agent = _get_agent(agent_id)
-        result = agent.screenshot.remote()
+        result = agent.screenshot()
         if "error" in result:
             return Response(
                 content=json.dumps({"error": result["error"]}),
@@ -382,37 +411,37 @@ def create_app():
     @web_app.get("/agents/{agent_id}/url")
     def agent_url(agent_id: str, _token: str = Depends(require_auth)):
         agent = _get_agent(agent_id)
-        return agent.get_url.remote()
+        return agent.get_url()
 
     @web_app.get("/agents/{agent_id}/title")
     def agent_title(agent_id: str, _token: str = Depends(require_auth)):
         agent = _get_agent(agent_id)
-        return agent.get_title.remote()
+        return agent.get_title()
 
     @web_app.post("/agents/{agent_id}/open")
     def agent_open(agent_id: str, url: str, _token: str = Depends(require_auth)):
         agent = _get_agent(agent_id)
-        return agent.open_url.remote(url)
+        return agent.open_url(url)
 
     @web_app.post("/agents/{agent_id}/js")
     def agent_js(agent_id: str, expression: str, _token: str = Depends(require_auth)):
         agent = _get_agent(agent_id)
-        return agent.run_js.remote(expression)
+        return agent.run_js(expression)
 
     @web_app.post("/agents/{agent_id}/click")
     def agent_click(agent_id: str, x: int, y: int, _token: str = Depends(require_auth)):
         agent = _get_agent(agent_id)
-        return agent.click.remote(x, y)
+        return agent.click(x, y)
 
     @web_app.post("/agents/{agent_id}/scroll")
     def agent_scroll(agent_id: str, dx: int = 0, dy: int = 0, _token: str = Depends(require_auth)):
         agent = _get_agent(agent_id)
-        return agent.scroll.remote(dx, dy)
+        return agent.scroll(dx, dy)
 
     @web_app.get("/agents/{agent_id}/viewport")
     def agent_viewport(agent_id: str, _token: str = Depends(require_auth)):
         agent = _get_agent(agent_id)
-        return agent.viewport.remote()
+        return agent.viewport()
 
     # --- Flat endpoints (aliases to default agent) ---
 
@@ -422,18 +451,18 @@ def create_app():
         agent = _get_agent(aid)
         if not cmd.args:
             raise HTTPException(status_code=422, detail="args must not be empty")
-        return agent.run_command.remote(cmd.args, cmd.timeout)
+        return agent.run_command(cmd.args, cmd.timeout)
 
     @web_app.get("/status")
     def status(_token: str = Depends(require_auth)):
         aid = _get_or_create_default()
-        return _get_agent(aid).status.remote()
+        return _get_agent(aid).status()
 
     @web_app.get("/screenshot")
     def screenshot(_token: str = Depends(require_auth)):
         aid = _get_or_create_default()
         agent = _get_agent(aid)
-        result = agent.screenshot.remote()
+        result = agent.screenshot()
         if "error" in result:
             return Response(
                 content=json.dumps({"error": result["error"]}),
@@ -445,37 +474,37 @@ def create_app():
     @web_app.get("/url")
     def get_url(_token: str = Depends(require_auth)):
         aid = _get_or_create_default()
-        return _get_agent(aid).get_url.remote()
+        return _get_agent(aid).get_url()
 
     @web_app.get("/title")
     def title(_token: str = Depends(require_auth)):
         aid = _get_or_create_default()
-        return _get_agent(aid).get_title.remote()
+        return _get_agent(aid).get_title()
 
     @web_app.post("/open")
     def open_url(url: str, _token: str = Depends(require_auth)):
         aid = _get_or_create_default()
-        return _get_agent(aid).open_url.remote(url)
+        return _get_agent(aid).open_url(url)
 
     @web_app.post("/js")
     def run_js(expression: str, _token: str = Depends(require_auth)):
         aid = _get_or_create_default()
-        return _get_agent(aid).run_js.remote(expression)
+        return _get_agent(aid).run_js(expression)
 
     @web_app.post("/click")
     def click_at(x: int, y: int, _token: str = Depends(require_auth)):
         aid = _get_or_create_default()
-        return _get_agent(aid).click.remote(x, y)
+        return _get_agent(aid).click(x, y)
 
     @web_app.post("/scroll")
     def scroll(dx: int = 0, dy: int = 0, _token: str = Depends(require_auth)):
         aid = _get_or_create_default()
-        return _get_agent(aid).scroll.remote(dx, dy)
+        return _get_agent(aid).scroll(dx, dy)
 
     @web_app.get("/viewport")
     def viewport(_token: str = Depends(require_auth)):
         aid = _get_or_create_default()
-        return _get_agent(aid).viewport.remote()
+        return _get_agent(aid).viewport()
 
     return web_app
 
