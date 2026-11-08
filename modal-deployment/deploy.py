@@ -69,6 +69,9 @@ app = modal.App("rodney", image=rodney_image)
 
 agent_registry = modal.Dict.from_name("rodney-agents", create_if_missing=True)
 
+SCREEN_WIDTH = 1280
+SCREEN_HEIGHT = 720
+
 DEFAULT_AGENT_ID = "default"
 AGENT_ID_LENGTH = 6
 AGENT_ID_CHARS = string.ascii_lowercase + string.digits
@@ -122,7 +125,10 @@ class BrowserAgent:
         import os
         shot_path = "/tmp/shot.png"
         result = subprocess.run(
-            ["rodney", "--global", "screenshot", shot_path],
+            # -w/-h capture the viewport; without -h rodney captures the full page,
+            # which breaks tap-to-click coordinates and scrolling in the UI.
+            ["rodney", "--global", "screenshot",
+             "-w", str(SCREEN_WIDTH), "-h", str(SCREEN_HEIGHT), shot_path],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
