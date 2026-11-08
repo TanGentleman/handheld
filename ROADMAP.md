@@ -60,6 +60,7 @@ near-identical `subprocess.run` wrappers inside the Modal class; SETUP.md repeat
   CI pins checkout v7.0.1 and setup-uv v10.3.3 by SHA, uv 0.13.7, ubuntu-24.04, Python 3.10
   and 3.14. `test_pins.py` keeps the image pins equal to `uv.lock`. README rewrite: local quick
   start first, env var table, boundaries.
+- `handheld-6`: README cut to 79 words; details moved to IMPLEMENTATION.md.
 
 ## Apply upstream
 
@@ -67,7 +68,7 @@ near-identical `subprocess.run` wrappers inside the Modal class; SETUP.md repeat
 # in kranti-sandbox
 git fetch origin
 base=$(git log -1 --format=%H --grep='^Import handheld upstream' origin/handheld-1)
-git format-patch --relative=handheld "$base"..origin/handheld-5 -o /tmp/handheld
+git format-patch --relative=handheld "$base"..origin/handheld-6 -o /tmp/handheld
 # in a clean upstream clone at 63094f0
 git clone https://github.com/TanGentleman/handheld && cd handheld
 git am /tmp/handheld/*.patch
