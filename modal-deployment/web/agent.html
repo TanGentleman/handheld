@@ -425,6 +425,8 @@ body{
   loadPollMode();
   detectViewport();
   dot.className = 'indicator live';
+  // first frame now, not after the first poll interval (5s by default)
+  refreshScreen(); syncUrl(); syncTitle();
   poll();
 })();
 </script>
