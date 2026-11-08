@@ -32,6 +32,10 @@ _HANDHELD_WEB_MOUNT = "/opt/handheld-web"
 
 # --- Image ---
 
+# rodney v0.4.0 needs Go >= 1.24.7. Bump both deliberately; rodney's CLI changes often.
+GO_VERSION = "1.26.10"
+RODNEY_VERSION = "v0.4.0"
+
 rodney_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install(
@@ -42,12 +46,13 @@ rodney_image = (
         "ca-certificates",
     )
     .run_commands(
-        "curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xz",
+        f"curl -fsSL https://go.dev/dl/go{GO_VERSION}.linux-amd64.tar.gz | tar -C /usr/local -xz",
     )
     .run_commands(
-        "GOPATH=/root/go CGO_ENABLED=0 /usr/local/go/bin/go install -ldflags='-s -w' github.com/simonw/rodney@latest",
+        "GOPATH=/root/go CGO_ENABLED=0 /usr/local/go/bin/go install -ldflags='-s -w' "
+        f"github.com/simonw/rodney@{RODNEY_VERSION}",
     )
-    .uv_pip_install("fastapi[standard]", "itsdangerous")
+    .uv_pip_install("fastapi[standard]==0.162.0", "itsdangerous==2.2.0")
     .add_local_dir(
         _DEPLOY_ROOT / "web",
         remote_path=_HANDHELD_WEB_MOUNT,
