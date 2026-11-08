@@ -1,141 +1,118 @@
 # Handheld
 
-Control a cloud browser from your phone.
+Drive a headless Chromium from your phone. A FastAPI app wraps the
+[rodney](https://github.com/simonw/rodney) CLI in an HTTP API and a phone UI: you see
+screenshots, tap to click, scroll, type, or run any rodney command. It runs on
+[Modal](https://modal.com) or on your own machine.
 
-Handheld deploys a headless Chromium instance on [Modal](https://modal.com) and wraps it in an HTTP API (via the [Rodney](https://github.com/simonw/rodney) CLI). Open the URL on your phone, log in, and you get a browser-in-a-browser you can tap, scroll, and type into.
+## Quick start (local, no Modal account)
 
-## Prerequisites
-
-- A [Modal](https://modal.com) account (free tier works)
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
-
-## Quick Start
+Needs [uv](https://docs.astral.sh/uv/) (CI uses uv 0.13.7), Python 3.10+, and
+[Go](https://go.dev/dl/) 1.24.7+ to build rodney.
 
 ```bash
-git clone https://github.com/TanGentleman/handheld.git
-cd handheld
-uv sync              # install dependencies (and the test tools)
-uv run modal setup   # one-time: log in to Modal
-./modal-deployment/deploy.sh  # deploys and prints your URL + token
+git clone https://github.com/TanGentleman/handheld && cd handheld
+uv sync --locked
+go install github.com/simonw/rodney@v0.4.0   # puts rodney in ~/go/bin; add it to PATH
+uv run modal-deployment/local.py             # prints a login token, serves http://127.0.0.1:8000/
 ```
 
-The script will print your **login URL** and **API token**. Open the login URL on your phone and enter the token.
-
-### Choose your own password
-
-Don't want to paste a random token on your phone? Set your own:
+Open `http://127.0.0.1:8000/` and enter the token, or call the API:
 
 ```bash
-RODNEY_PASSWORD=a-long-passphrase ./modal-deployment/deploy.sh
+TOKEN=...   # printed by local.py
+curl -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8000/open?url=https://example.com"
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/title     # {"title":"Example Domain","exit_code":0}
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/screenshot -o page.png
 ```
 
-Your token is saved to `modal-deployment/.env` so you can always recover it.
+`local.py [--host 127.0.0.1] [--port 8000]`. Each agent gets its own Chrome; browser state
+lives in a temp directory removed on exit.
 
-### Or run it locally first
+## Deploy to Modal
 
-No Modal account: the same UI and API against Chrome on your machine. Needs
-[Go](https://go.dev/dl/) for rodney.
+Needs a Modal account.
 
 ```bash
-go install github.com/simonw/rodney@v0.4.0   # puts rodney in ~/go/bin
-uv run modal-deployment/local.py             # prints a login token and http://127.0.0.1:8000/
+uv sync --locked
+uv run modal setup                  # one-time login
+./modal-deployment/deploy.sh        # creates the rodney-auth secret, deploys, prints URL and token
 ```
 
-Each agent is its own Chrome. `--host 0.0.0.0` makes it reachable from your phone on the
-same network; that is plain HTTP, so the token travels unencrypted. Without
-`ROD_CHROME_BIN=/path/to/chrome`, rodney downloads its own Chromium on first start.
+`deploy.sh` saves the token to `modal-deployment/.env` (mode 600). It recreates the secret on
+every run, which logs out existing sessions. The first deploy builds the image (Debian
+`chromium`, Go 1.27.3, rodney v0.4.0, Python 3.12) and takes a few minutes. Modal prints a URL
+like `https://<workspace>--rodney-api.modal.run`; use it in place of `http://127.0.0.1:8000`
+above.
 
-## Manual Deploy (no script)
+Without the script:
 
 ```bash
-uv sync
-uv run modal setup
-
-# Create auth secret
 uv run modal secret create rodney-auth \
-  RODNEY_API_TOKENS=your-password \
+  RODNEY_API_TOKENS=your-token \
   RODNEY_COOKIE_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-
-# Deploy (or `modal serve` for a temporary, hot-reloading URL)
-uv run modal deploy modal-deployment/deploy.py
-```
-
-The first deploy takes a few minutes (it installs Chromium and builds rodney with Go); later
-deploys reuse the cached image. Modal prints a URL like
-`https://your-workspace--rodney-api.modal.run`. Check it with curl:
-
-```bash
-URL=https://your-workspace--rodney-api.modal.run TOKEN=your-password
-curl -H "Authorization: Bearer $TOKEN" -X POST "$URL/open?url=https://example.com"
-curl -H "Authorization: Bearer $TOKEN" "$URL/title"
-curl -H "Authorization: Bearer $TOKEN" "$URL/screenshot" -o page.png
-```
-
-## Using Handheld
-
-### Phone browser UI
-
-After logging in, the root URL (`/`) gives you a full browser interface with:
-- Screenshot viewport — tap to click
-- URL bar with back/forward
-- Scroll, type, and command controls
-
-### API Endpoints
-
-Everything except `/login`, `/logout`, `/docs`, `/redoc` and `/openapi.json` requires auth
-(`Authorization: Bearer <token>` header or the session cookie set by `/login`).
-
-These act on the `default` agent. The same routes exist per agent under
-`/agents/{agent_id}/...`.
-
-| Method | Endpoint      | Description                          |
-|--------|---------------|--------------------------------------|
-| POST   | `/open`       | Navigate (`?url=https://...`)        |
-| GET    | `/screenshot` | PNG of the 1280x720 viewport         |
-| GET    | `/title`      | Current page title                   |
-| GET    | `/url`        | Current page URL                     |
-| POST   | `/js`         | Run JavaScript (`?expression=...`)   |
-| POST   | `/click`      | Click at viewport pixel (`?x=&y=`)   |
-| POST   | `/scroll`     | Scroll by (`?dx=&dy=`)               |
-| GET    | `/viewport`   | Window size                          |
-| POST   | `/run`        | Any rodney command (JSON body)       |
-| GET    | `/status`     | Chrome/rodney status                 |
-| GET    | `/docs`       | Interactive Swagger UI (public)      |
-
-Agents: `POST /agents` creates one (its own container and Chromium),
-`GET /agents` lists them, `DELETE /agents/{agent_id}` removes it from the list.
-
-### The `/run` endpoint
-
-Send any [rodney command](https://github.com/simonw/rodney#usage) as JSON:
-
-```json
-{"args": ["click", "#submit-button"], "timeout": 10}
-{"args": ["input", "#search", "hello world"]}
-{"args": ["text", "h1"]}
-```
-
-It returns `{"exit_code": 0, "stdout": "...", "stderr": "", "is_binary": false}`. Output
-that is not UTF-8 comes back base64-encoded with `is_binary: true`.
-
-### iOS Shortcuts / Android Tasker
-
-Point an HTTP action at your Modal URL with:
-- Header: `Authorization: Bearer your-token`
-- Body: JSON with `args` array
-
-## Troubleshooting
-
-**Slow first request**: containers shut down after 5 minutes idle (`scaledown_window=300` in `deploy.py`), so the next request cold-starts Chromium. Add `min_containers=1` to the `@app.function` and `@app.cls` decorators to keep one warm, at the cost of paying for it.
-
-**Check logs:**
-```bash
+uv run modal deploy modal-deployment/deploy.py   # or `modal serve` for a temporary URL
 uv run modal app logs rodney
 ```
 
-**Tests** (offline, no Modal account needed): `uv run pytest`. With rodney and Chrome
-installed, `HANDHELD_LIVE=1 uv run pytest -k live` also drives a real browser.
+Containers stop after 5 minutes idle (`scaledown_window=300` in `deploy.py`), so the next
+request cold-starts Chromium.
 
-## License
+## Environment
+
+| Variable | Used by | Effect |
+| --- | --- | --- |
+| `RODNEY_API_TOKENS` | app | Comma-separated accepted tokens. Empty entries are ignored; no token means every request is 401. `local.py` generates one if unset. |
+| `RODNEY_COOKIE_SECRET` | app | Signs the session cookie. `local.py` generates one if unset. |
+| `RODNEY_PASSWORD` | `deploy.sh` | Use this as the token instead of a random one (warns under 12 characters). |
+| `ROD_CHROME_BIN` | rodney | Chrome to launch. Unset, rodney downloads its own Chromium on first start. |
+| `HANDHELD_LIVE` | tests | `1` runs the live browser tests. |
+
+## API
+
+Everything except `/login`, `/logout`, `/docs`, `/redoc` and `/openapi.json` needs
+`Authorization: Bearer <token>` or the cookie set by `/login`. These routes act on the
+`default` agent; the same routes exist under `/agents/{agent_id}/...`.
+
+| Method | Route | Effect |
+| --- | --- | --- |
+| POST | `/open?url=` | Navigate |
+| GET | `/screenshot` | PNG of the 1280x720 viewport |
+| GET | `/title`, `/url` | Current page title, URL |
+| POST | `/js?expression=` | Run JavaScript |
+| POST | `/click?x=&y=` | Click at a viewport pixel |
+| POST | `/scroll?dx=&dy=` | Scroll by |
+| GET | `/viewport` | Window size |
+| GET | `/status` | Chrome/rodney status |
+| GET | `/`, `/agents/{agent_id}/ui` | Agent dashboard, phone UI for one agent |
+| POST | `/run` | Any rodney command |
+| POST, GET | `/agents` | Create (own Chrome; on Modal its own container), list |
+| GET | `/agents/summary` | Short per-agent list the dashboard polls |
+| DELETE | `/agents/{agent_id}` | Remove from the list |
+
+`/run` takes `{"args": ["input", "#search", "hello"], "timeout": 10}` and returns
+`{"exit_code": 0, "stdout": "...", "stderr": "", "is_binary": false}`; output that is not UTF-8
+comes back base64-encoded with `is_binary: true`. The same request works from an iOS Shortcut
+or Tasker HTTP action.
+
+## Test
+
+```bash
+uv sync --locked
+uv run pytest                       # offline: fake rodney on disk, fake backend, no Modal credentials
+bash -n modal-deployment/deploy.sh
+HANDHELD_LIVE=1 ROD_CHROME_BIN=/path/to/chrome uv run pytest -k live   # needs rodney on PATH
+```
+
+CI runs the first three commands on Python 3.10 and 3.14.
+
+## Boundaries
+
+- The browser opens whatever URL you send it; anyone with a token controls it.
+- Local mode serves plain HTTP with a non-Secure cookie. `--host 0.0.0.0` exposes it to your
+  network with the token unencrypted.
+- Verified: the offline tests, the live tests and the local quick start against Chrome on
+  Linux. Not verified: a Modal deploy or `deploy.sh` past its login check (no Modal account),
+  the phone UI on a real phone.
 
 [MIT](LICENSE)
