@@ -21,7 +21,7 @@ uv sync --project "$REPO_ROOT"
 
 # `modal profile current` exits 0 even without credentials; `token info` does not.
 if ! uv run modal token info &>/dev/null; then
-  echo "error: not logged into modal — run 'modal setup' first"
+  echo "error: not logged into modal — run 'uv run modal setup' first"
   exit 1
 fi
 
@@ -78,7 +78,7 @@ echo ""
 echo "  token:      ${api_token}"
 echo "  saved to:   ${ENV_FILE}"
 echo ""
-echo "  logs:       modal app logs rodney"
+echo "  logs:       uv run modal app logs rodney"
 echo "  dashboard:  https://modal.com/apps"
 echo "========================================="
 

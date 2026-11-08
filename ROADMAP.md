@@ -52,8 +52,9 @@ near-identical `subprocess.run` wrappers inside the Modal class; SETUP.md repeat
 - `handheld-3` (done): `uv run modal-deployment/local.py`, the same app and UI against
   local Chrome, one rodney session per agent; `create_app` takes the backend; the agent UI
   shows its first frame on load instead of after 5s.
-- `handheld-4` (planned): one router serves both `/agents/{id}/...` and the default-agent
-  routes; fold SETUP.md into the README.
+- `handheld-4` (done): the browser routes are registered once for both `/agents/{id}/...`
+  and the default agent (pinned first by `test_routes.py`); SETUP.md and the
+  `modal-deployment/README.md` pointer are folded into the README.
 
 ## Apply a branch upstream
 

@@ -15,11 +15,21 @@ Handheld deploys a headless Chromium instance on [Modal](https://modal.com) and 
 git clone https://github.com/TanGentleman/handheld.git
 cd handheld
 uv sync              # install dependencies (and the test tools)
-modal setup          # one-time — authenticates with Modal
+uv run modal setup   # one-time: log in to Modal
 ./modal-deployment/deploy.sh  # deploys and prints your URL + token
 ```
 
 The script will print your **login URL** and **API token**. Open the login URL on your phone and enter the token.
+
+### Choose your own password
+
+Don't want to paste a random token on your phone? Set your own:
+
+```bash
+RODNEY_PASSWORD=a-long-passphrase ./modal-deployment/deploy.sh
+```
+
+Your token is saved to `modal-deployment/.env` so you can always recover it.
 
 ### Or run it locally first
 
@@ -35,29 +45,30 @@ Each agent is its own Chrome. `--host 0.0.0.0` makes it reachable from your phon
 same network; that is plain HTTP, so the token travels unencrypted. Without
 `ROD_CHROME_BIN=/path/to/chrome`, rodney downloads its own Chromium on first start.
 
-### Choose your own password
-
-Don't want to paste a random token on your phone? Set your own:
-
-```bash
-RODNEY_PASSWORD=a-long-passphrase ./modal-deployment/deploy.sh
-```
-
-Your token is saved to `modal-deployment/.env` so you can always recover it.
-
 ## Manual Deploy (no script)
 
 ```bash
 uv sync
-modal setup
+uv run modal setup
 
 # Create auth secret
-modal secret create rodney-auth \
+uv run modal secret create rodney-auth \
   RODNEY_API_TOKENS=your-password \
   RODNEY_COOKIE_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 
-# Deploy
+# Deploy (or `modal serve` for a temporary, hot-reloading URL)
 uv run modal deploy modal-deployment/deploy.py
+```
+
+The first deploy takes a few minutes (it installs Chromium and builds rodney with Go); later
+deploys reuse the cached image. Modal prints a URL like
+`https://your-workspace--rodney-api.modal.run`. Check it with curl:
+
+```bash
+URL=https://your-workspace--rodney-api.modal.run TOKEN=your-password
+curl -H "Authorization: Bearer $TOKEN" -X POST "$URL/open?url=https://example.com"
+curl -H "Authorization: Bearer $TOKEN" "$URL/title"
+curl -H "Authorization: Bearer $TOKEN" "$URL/screenshot" -o page.png
 ```
 
 ## Using Handheld
@@ -104,6 +115,9 @@ Send any [rodney command](https://github.com/simonw/rodney#usage) as JSON:
 {"args": ["text", "h1"]}
 ```
 
+It returns `{"exit_code": 0, "stdout": "...", "stderr": "", "is_binary": false}`. Output
+that is not UTF-8 comes back base64-encoded with `is_binary: true`.
+
 ### iOS Shortcuts / Android Tasker
 
 Point an HTTP action at your Modal URL with:
@@ -116,13 +130,11 @@ Point an HTTP action at your Modal URL with:
 
 **Check logs:**
 ```bash
-modal app logs rodney
+uv run modal app logs rodney
 ```
 
 **Tests** (offline, no Modal account needed): `uv run pytest`. With rodney and Chrome
 installed, `HANDHELD_LIVE=1 uv run pytest -k live` also drives a real browser.
-
-**Detailed setup docs:** See [modal-deployment/SETUP.md](modal-deployment/SETUP.md).
 
 ## License
 
