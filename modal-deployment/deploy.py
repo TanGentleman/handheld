@@ -16,13 +16,15 @@ Prerequisites:
   - modal secret create rodney-auth RODNEY_API_TOKENS=tok1,tok2 RODNEY_COOKIE_SECRET=hex...
 """
 
+import hashlib
 import hmac
 import random
 import string
-import subprocess
 from pathlib import Path
 
 import modal
+
+from browser import Rodney
 
 # Directory containing this file (used for Modal image mounts and local pytest).
 _DEPLOY_ROOT = Path(__file__).resolve().parent
@@ -30,6 +32,10 @@ _DEPLOY_ROOT = Path(__file__).resolve().parent
 _HANDHELD_WEB_MOUNT = "/opt/handheld-web"
 
 # --- Image ---
+
+# rodney v0.4.0 needs Go >= 1.24.7. Bump both deliberately; rodney's CLI changes often.
+GO_VERSION = "1.27.3"
+RODNEY_VERSION = "v0.4.0"
 
 rodney_image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -41,12 +47,13 @@ rodney_image = (
         "ca-certificates",
     )
     .run_commands(
-        "curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xz",
+        f"curl -fsSL https://go.dev/dl/go{GO_VERSION}.linux-amd64.tar.gz | tar -C /usr/local -xz",
     )
     .run_commands(
-        "GOPATH=/root/go CGO_ENABLED=0 /usr/local/go/bin/go install -ldflags='-s -w' github.com/simonw/rodney@latest",
+        "GOPATH=/root/go CGO_ENABLED=0 /usr/local/go/bin/go install -ldflags='-s -w' "
+        f"github.com/simonw/rodney@{RODNEY_VERSION}",
     )
-    .uv_pip_install("fastapi[standard]", "itsdangerous")
+    .uv_pip_install("fastapi[standard]==0.162.2", "itsdangerous==2.2.0")
     .add_local_dir(
         _DEPLOY_ROOT / "web",
         remote_path=_HANDHELD_WEB_MOUNT,
@@ -60,6 +67,7 @@ rodney_image = (
             "HANDHELD_WEB_DIR": _HANDHELD_WEB_MOUNT,
         }
     )
+    .add_local_python_source("browser")
 )
 
 app = modal.App("rodney", image=rodney_image)
@@ -85,154 +93,83 @@ def _generate_agent_id() -> str:
     scaledown_window=300,
 )
 class BrowserAgent:
+    """Thin Modal wrapper: the rodney calls live in browser.Rodney."""
+
     # Each distinct agent_id gets its own container / Chromium (Modal parametrized cls).
     agent_id: str = modal.parameter()
 
     @modal.enter()
     def start_chrome(self):
-        """Start Chromium via rodney on container boot."""
-        result = subprocess.run(
-            ["rodney", "status"], capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            subprocess.run(
-                ["rodney", "start", "--global"],
-                capture_output=True, text=True, check=True,
-            )
+        self.browser = Rodney()
+        self.browser.ensure_started()
 
     @modal.exit()
     def stop_chrome(self):
-        """Kill Chrome on container shutdown."""
-        subprocess.run(
-            ["rodney", "--global", "stop"],
-            capture_output=True, text=True,
-        )
+        self.browser.stop()
 
     @modal.method()
     def status(self) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "status"],
-            capture_output=True, text=True,
-        )
-        return {"exit_code": result.returncode, "output": result.stdout.strip()}
+        return self.browser.status()
 
     @modal.method()
     def screenshot(self) -> dict:
-        import os
-        shot_path = "/tmp/shot.png"
-        result = subprocess.run(
-            ["rodney", "--global", "screenshot", shot_path],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            return {"error": result.stderr.strip()}
-        with open(shot_path, "rb") as f:
-            png = f.read()
-        os.remove(shot_path)
-        return {"png": png}
+        return self.browser.screenshot()
 
     @modal.method()
     def get_url(self) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "url"],
-            capture_output=True, text=True,
-        )
-        return {"url": result.stdout.strip(), "exit_code": result.returncode}
+        return self.browser.get_url()
 
     @modal.method()
     def get_title(self) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "title"],
-            capture_output=True, text=True,
-        )
-        return {"title": result.stdout.strip(), "exit_code": result.returncode}
+        return self.browser.get_title()
 
     @modal.method()
     def open_url(self, url: str) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "open", url],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            # e.g. user ran `rodney stop` — same start as @modal.enter
-            subprocess.run(
-                ["rodney", "start", "--global"],
-                capture_output=True, text=True,
-            )
-            result = subprocess.run(
-                ["rodney", "--global", "open", url],
-                capture_output=True, text=True,
-            )
-        return {"exit_code": result.returncode, "stderr": result.stderr.strip()}
+        return self.browser.open_url(url)
 
     @modal.method()
     def run_js(self, expression: str) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "js", expression],
-            capture_output=True, text=True,
-        )
-        return {
-            "result": result.stdout.strip(),
-            "exit_code": result.returncode,
-            "stderr": result.stderr.strip(),
-        }
+        return self.browser.run_js(expression)
 
     @modal.method()
     def click(self, x: int, y: int) -> dict:
-        js_code = f"""(function(){{
-            var el=document.elementFromPoint({x},{y});
-            if(!el) return 'no element';
-            el.dispatchEvent(new MouseEvent('mouseover',{{bubbles:true,clientX:{x},clientY:{y}}}));
-            el.dispatchEvent(new MouseEvent('mousedown',{{bubbles:true,clientX:{x},clientY:{y}}}));
-            el.dispatchEvent(new MouseEvent('mouseup',{{bubbles:true,clientX:{x},clientY:{y}}}));
-            el.dispatchEvent(new MouseEvent('click',{{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}}));
-            return el.tagName+(el.id?'#'+el.id:'');
-        }})()"""
-        result = subprocess.run(
-            ["rodney", "--global", "js", js_code],
-            capture_output=True, text=True,
-        )
-        return {"exit_code": result.returncode, "clicked": result.stdout.strip()}
+        return self.browser.click(x, y)
 
     @modal.method()
     def scroll(self, dx: int, dy: int) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "js", f"window.scrollBy({dx},{dy})"],
-            capture_output=True, text=True,
-        )
-        return {"exit_code": result.returncode}
+        return self.browser.scroll(dx, dy)
 
     @modal.method()
     def viewport(self) -> dict:
-        result = subprocess.run(
-            ["rodney", "--global", "js",
-             "JSON.stringify({w:window.innerWidth,h:window.innerHeight})"],
-            capture_output=True, text=True,
-        )
-        return {"exit_code": result.returncode, "viewport": result.stdout.strip()}
+        return self.browser.viewport()
 
     @modal.method()
     def run_command(self, args: list[str], timeout: int = 30) -> dict:
-        import base64
-        MAX_TIMEOUT = 120
-        result = subprocess.run(
-            ["rodney", "--global"] + args,
-            capture_output=True,
-            timeout=min(timeout, MAX_TIMEOUT),
-        )
-        stdout = result.stdout
-        is_binary = False
-        try:
-            stdout_str = stdout.decode("utf-8")
-        except UnicodeDecodeError:
-            stdout_str = base64.b64encode(stdout).decode("ascii")
-            is_binary = True
-        return {
-            "exit_code": result.returncode,
-            "stdout": stdout_str,
-            "stderr": result.stderr.decode("utf-8", errors="replace"),
-            "is_binary": is_binary,
-        }
+        return self.browser.run_command(args, timeout)
+
+
+class _Remote:
+    """Call a Modal cls instance's methods like plain methods: agent.status() -> .status.remote()."""
+
+    def __init__(self, obj):
+        self._obj = obj
+
+    def __getattr__(self, name):
+        return getattr(self._obj, name).remote
+
+
+class ModalBackend:
+    """One Modal container per agent; the registry is a modal.Dict shared across containers."""
+
+    @property
+    def registry(self):
+        return agent_registry
+
+    def agent(self, agent_id: str):
+        return _Remote(BrowserAgent(agent_id=agent_id))
+
+    def forget(self, agent_id: str) -> None:
+        pass  # the container scales down on its own
 
 
 # HTML templates: `web/login.html`, `web/dashboard.html`, `web/agent.html` (loaded in `create_app`).
@@ -240,7 +177,9 @@ class BrowserAgent:
 # --- App factory (importable by tests) ---
 
 
-def create_app():
+def create_app(backend=None, secure_cookie: bool = True):
+    """Build the FastAPI app. `backend` supplies the agent registry and browsers
+    (ModalBackend by default; local.py passes a LocalBackend)."""
     import json
     import os
     from datetime import datetime, timezone
@@ -256,17 +195,28 @@ def create_app():
     agent_tpl = string.Template((web_dir / "agent.html").read_text(encoding="utf-8"))
     dashboard_html = (web_dir / "dashboard.html").read_text(encoding="utf-8")
 
-    VALID_TOKENS = set(os.environ["RODNEY_API_TOKENS"].split(","))
-    cookie_signer = URLSafeTimedSerializer(os.environ["RODNEY_COOKIE_SECRET"])
+    VALID_TOKENS = {t.strip() for t in os.environ.get("RODNEY_API_TOKENS", "").split(",") if t.strip()}
+    if not VALID_TOKENS:
+        raise RuntimeError("RODNEY_API_TOKENS must contain at least one non-empty token")
+    cookie_secret = os.environ.get("RODNEY_COOKIE_SECRET", "")
+    if not cookie_secret:
+        raise RuntimeError("RODNEY_COOKIE_SECRET must be set")
+    cookie_signer = URLSafeTimedSerializer(cookie_secret)
     COOKIE_NAME = "rodney_session"
     COOKIE_MAX_AGE = 30 * 24 * 3600  # 30 days
 
-    def _token_is_valid(candidate: str) -> bool:
-        """Constant-time check against all valid tokens to prevent timing attacks."""
+    def _digest(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    VALID_DIGESTS = {_digest(t) for t in VALID_TOKENS}
+
+    def _digest_is_valid(candidate: str) -> bool:
+        """Constant-time check against all valid token digests to prevent timing attacks."""
         candidate_b = candidate.encode("utf-8")
-        return any(
-            hmac.compare_digest(candidate_b, valid.encode("utf-8")) for valid in VALID_TOKENS
-        )
+        return any(hmac.compare_digest(candidate_b, d.encode("utf-8")) for d in VALID_DIGESTS)
+
+    def _token_is_valid(candidate: str) -> bool:
+        return _digest_is_valid(_digest(candidate))
 
     def require_auth(request: Request) -> str:
         # Bearer token
@@ -280,32 +230,35 @@ def create_app():
         cookie = request.cookies.get(COOKIE_NAME)
         if cookie:
             try:
-                token = cookie_signer.loads(cookie, max_age=COOKIE_MAX_AGE)
-                if _token_is_valid(token):
-                    return token
+                digest = cookie_signer.loads(cookie, max_age=COOKIE_MAX_AGE)
+                if isinstance(digest, str) and _digest_is_valid(digest):
+                    return digest
             except (BadSignature, SignatureExpired):
                 pass
 
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    backend = backend or ModalBackend()
+    registry = backend.registry
+
     web_app = FastAPI(title="Handheld", docs_url="/docs")
 
     # --- Helper: get or create agent instance ---
 
-    def _get_agent(agent_id: str) -> BrowserAgent:
+    def _get_agent(agent_id: str):
         """Look up an agent by ID. Raises 404 if not registered."""
         try:
-            agent_registry[agent_id]
+            registry[agent_id]
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-        return BrowserAgent(agent_id=agent_id)
+        return backend.agent(agent_id)
 
     def _get_or_create_default() -> str:
         """Ensure the default agent exists, return its ID."""
         try:
-            agent_registry[DEFAULT_AGENT_ID]
+            registry[DEFAULT_AGENT_ID]
         except KeyError:
-            agent_registry[DEFAULT_AGENT_ID] = {
+            registry[DEFAULT_AGENT_ID] = {
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "purpose": "default",
                 "status": "active",
@@ -344,7 +297,8 @@ def create_app():
                 login_tpl.substitute(error='<p class="error">invalid token</p>'),
                 status_code=401,
             )
-        signed = cookie_signer.dumps(token)
+        # The cookie carries a digest, not the token itself (itsdangerous signs but does not encrypt).
+        signed = cookie_signer.dumps(_digest(token))
         response = RedirectResponse(url="/", status_code=303)
         response.set_cookie(
             COOKIE_NAME,
@@ -352,14 +306,14 @@ def create_app():
             max_age=COOKIE_MAX_AGE,
             httponly=True,
             samesite="lax",
-            secure=False,  # Modal terminates TLS at the proxy; ASGI sees HTTP
+            secure=secure_cookie,  # Modal serves HTTPS even though the ASGI app sees HTTP
         )
         return response
 
     @web_app.get("/logout")
     def logout():
         response = RedirectResponse(url="/login", status_code=303)
-        response.delete_cookie(COOKIE_NAME)
+        response.delete_cookie(COOKIE_NAME, httponly=True, samesite="lax", secure=secure_cookie)
         return response
 
     # --- Agent lifecycle endpoints ---
@@ -373,15 +327,14 @@ def create_app():
         _token: str = Depends(require_auth),
     ):
         agent_id = _generate_agent_id()
-        agent_registry[agent_id] = {
+        registry[agent_id] = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "purpose": body.purpose,
             "status": "active",
         }
-        # Warm this agent's container (distinct pool per agent_id)
-        agent = BrowserAgent(agent_id=agent_id)
+        # Start this agent's browser now (on Modal: warm its container)
         try:
-            agent.status.remote()
+            backend.agent(agent_id).status()
         except Exception:
             pass
         return {"agent_id": agent_id}
@@ -389,8 +342,8 @@ def create_app():
     @web_app.get("/agents")
     def list_agents(_token: str = Depends(require_auth)):
         agents = []
-        for key in list(agent_registry.keys()):
-            info = agent_registry[key]
+        for key in list(registry.keys()):
+            info = registry[key]
             agents.append({"id": key, **info})
         return agents
 
@@ -398,8 +351,8 @@ def create_app():
     def agents_summary(_token: str = Depends(require_auth)):
         """Lightweight summary of all agents for mobile polling."""
         agents = []
-        for key in list(agent_registry.keys()):
-            info = agent_registry[key]
+        for key in list(registry.keys()):
+            info = registry[key]
             agents.append({
                 "id": key,
                 "status": info.get("status", "unknown"),
@@ -411,7 +364,7 @@ def create_app():
     @web_app.get("/agents/{agent_id}")
     def get_agent_info(agent_id: str, _token: str = Depends(require_auth)):
         try:
-            info = agent_registry[agent_id]
+            info = registry[agent_id]
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         return {"id": agent_id, **info}
@@ -419,138 +372,79 @@ def create_app():
     @web_app.delete("/agents/{agent_id}")
     def delete_agent(agent_id: str, _token: str = Depends(require_auth)):
         try:
-            del agent_registry[agent_id]
+            del registry[agent_id]
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        backend.forget(agent_id)
         return {"deleted": agent_id}
 
-    # --- Scoped agent endpoints ---
+    # --- Browser endpoints: once per agent, once more for the default agent ---
 
     class RodneyCommand(BaseModel):
         args: list[str]
         timeout: int = 30
 
-    @web_app.post("/agents/{agent_id}/run")
-    def agent_run(agent_id: str, cmd: RodneyCommand, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        if not cmd.args:
-            raise HTTPException(status_code=422, detail="args must not be empty")
-        return agent.run_command.remote(cmd.args, cmd.timeout)
+    # Both depend on require_auth so an unauthenticated request never reaches the backend.
+    def scoped_agent(agent_id: str, _token: str = Depends(require_auth)):
+        return _get_agent(agent_id)
 
-    @web_app.get("/agents/{agent_id}/status")
-    def agent_status(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.status.remote()
+    def default_agent(_token: str = Depends(require_auth)):
+        return _get_agent(_get_or_create_default())
 
-    @web_app.get("/agents/{agent_id}/screenshot")
-    def agent_screenshot(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        result = agent.screenshot.remote()
-        if "error" in result:
-            return Response(
-                content=json.dumps({"error": result["error"]}),
-                media_type="application/json",
-                status_code=500,
-            )
-        return Response(content=result["png"], media_type="image/png")
+    def add_browser_routes(prefix: str, agent_dep) -> None:
+        Agent = Depends(agent_dep)
 
-    @web_app.get("/agents/{agent_id}/url")
-    def agent_url(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.get_url.remote()
+        @web_app.post(prefix + "/run")
+        def run(cmd: RodneyCommand, agent=Agent):
+            if not cmd.args:
+                raise HTTPException(status_code=422, detail="args must not be empty")
+            return agent.run_command(cmd.args, cmd.timeout)
 
-    @web_app.get("/agents/{agent_id}/title")
-    def agent_title(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.get_title.remote()
+        @web_app.get(prefix + "/status")
+        def status(agent=Agent):
+            return agent.status()
 
-    @web_app.post("/agents/{agent_id}/open")
-    def agent_open(agent_id: str, url: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.open_url.remote(url)
+        @web_app.get(prefix + "/screenshot")
+        def screenshot(agent=Agent):
+            result = agent.screenshot()
+            if "error" in result:
+                return Response(
+                    content=json.dumps({"error": result["error"]}),
+                    media_type="application/json",
+                    status_code=500,
+                )
+            return Response(content=result["png"], media_type="image/png")
 
-    @web_app.post("/agents/{agent_id}/js")
-    def agent_js(agent_id: str, expression: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.run_js.remote(expression)
+        @web_app.get(prefix + "/url")
+        def url(agent=Agent):
+            return agent.get_url()
 
-    @web_app.post("/agents/{agent_id}/click")
-    def agent_click(agent_id: str, x: int, y: int, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.click.remote(x, y)
+        @web_app.get(prefix + "/title")
+        def title(agent=Agent):
+            return agent.get_title()
 
-    @web_app.post("/agents/{agent_id}/scroll")
-    def agent_scroll(agent_id: str, dx: int = 0, dy: int = 0, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.scroll.remote(dx, dy)
+        @web_app.post(prefix + "/open")
+        def open_url(url: str, agent=Agent):
+            return agent.open_url(url)
 
-    @web_app.get("/agents/{agent_id}/viewport")
-    def agent_viewport(agent_id: str, _token: str = Depends(require_auth)):
-        agent = _get_agent(agent_id)
-        return agent.viewport.remote()
+        @web_app.post(prefix + "/js")
+        def js(expression: str, agent=Agent):
+            return agent.run_js(expression)
 
-    # --- Flat endpoints (aliases to default agent) ---
+        @web_app.post(prefix + "/click")
+        def click(x: int, y: int, agent=Agent):
+            return agent.click(x, y)
 
-    @web_app.post("/run")
-    def run_command(cmd: RodneyCommand, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        agent = _get_agent(aid)
-        if not cmd.args:
-            raise HTTPException(status_code=422, detail="args must not be empty")
-        return agent.run_command.remote(cmd.args, cmd.timeout)
+        @web_app.post(prefix + "/scroll")
+        def scroll(dx: int = 0, dy: int = 0, agent=Agent):
+            return agent.scroll(dx, dy)
 
-    @web_app.get("/status")
-    def status(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).status.remote()
+        @web_app.get(prefix + "/viewport")
+        def viewport(agent=Agent):
+            return agent.viewport()
 
-    @web_app.get("/screenshot")
-    def screenshot(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        agent = _get_agent(aid)
-        result = agent.screenshot.remote()
-        if "error" in result:
-            return Response(
-                content=json.dumps({"error": result["error"]}),
-                media_type="application/json",
-                status_code=500,
-            )
-        return Response(content=result["png"], media_type="image/png")
-
-    @web_app.get("/url")
-    def get_url(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).get_url.remote()
-
-    @web_app.get("/title")
-    def title(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).get_title.remote()
-
-    @web_app.post("/open")
-    def open_url(url: str, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).open_url.remote(url)
-
-    @web_app.post("/js")
-    def run_js(expression: str, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).run_js.remote(expression)
-
-    @web_app.post("/click")
-    def click_at(x: int, y: int, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).click.remote(x, y)
-
-    @web_app.post("/scroll")
-    def scroll(dx: int = 0, dy: int = 0, _token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).scroll.remote(dx, dy)
-
-    @web_app.get("/viewport")
-    def viewport(_token: str = Depends(require_auth)):
-        aid = _get_or_create_default()
-        return _get_agent(aid).viewport.remote()
+    add_browser_routes("/agents/{agent_id}", scoped_agent)
+    add_browser_routes("", default_agent)
 
     return web_app
 

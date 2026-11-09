@@ -7,6 +7,7 @@ and agent_registry so we can test auth flows in isolation.
     pytest test_auth.py -v
 """
 
+import hashlib
 import os
 import time
 from unittest.mock import MagicMock, patch
@@ -18,6 +19,8 @@ from itsdangerous import URLSafeTimedSerializer
 TOKENS = "alpha-token-aaa,bravo-token-bbb"
 COOKIE_SECRET = "test-cookie-secret-for-signing"
 ENV = {"RODNEY_API_TOKENS": TOKENS, "RODNEY_COOKIE_SECRET": COOKIE_SECRET}
+# Session cookies are Secure, so the test client must use https.
+BASE_URL = "https://testserver"
 
 # Fake return values that mimic BrowserAgent remote calls
 FAKE_STATUS = {"exit_code": 0, "output": "ok"}
@@ -61,7 +64,7 @@ def client():
             patch.object(deploy, "agent_registry", fake_registry),
             patch.object(deploy, "BrowserAgent", return_value=fake_agent),
         ):
-            yield TestClient(deploy.create_app())
+            yield TestClient(deploy.create_app(), base_url=BASE_URL)
 
 
 @pytest.fixture()
@@ -136,9 +139,30 @@ def test_cookie_auth_works(authed_client):
     assert r.status_code == 200
 
 
+def test_cookie_flags_and_payload(client):
+    r = client.post("/login", data={"token": "alpha-token-aaa"}, follow_redirects=False)
+    set_cookie = r.headers["set-cookie"]
+    assert "HttpOnly" in set_cookie
+    assert "Secure" in set_cookie
+    assert "samesite=lax" in set_cookie.lower()
+    signed = client.cookies["rodney_session"]
+    payload = URLSafeTimedSerializer(COOKIE_SECRET).loads(signed)
+    assert payload == hashlib.sha256(b"alpha-token-aaa").hexdigest()
+    assert "alpha-token-aaa" not in signed
+
+
+def test_cookie_with_raw_token_rejected(client):
+    """Cookies hold a token digest; a signed raw token is not a session."""
+    client.cookies.set("rodney_session", URLSafeTimedSerializer(COOKIE_SECRET).dumps("alpha-token-aaa"))
+    assert client.get("/status").status_code == 401
+
+
+def _signed_session(token: str) -> str:
+    return URLSafeTimedSerializer(COOKIE_SECRET).dumps(hashlib.sha256(token.encode()).hexdigest())
+
+
 def test_expired_cookie_rejected(client):
-    signer = URLSafeTimedSerializer(COOKIE_SECRET)
-    signed = signer.dumps("alpha-token-aaa")
+    signed = _signed_session("alpha-token-aaa")
     # Verify it works when fresh
     client.cookies.set("rodney_session", signed)
     assert client.get("/status").status_code == 200
@@ -166,7 +190,7 @@ def test_revoked_token_cookie_fails():
             patch.object(deploy, "agent_registry", fake_registry),
             patch.object(deploy, "BrowserAgent", return_value=fake_agent),
         ):
-            client = TestClient(deploy.create_app())
+            client = TestClient(deploy.create_app(), base_url=BASE_URL)
             client.post("/login", data={"token": "bravo-token-bbb"})
             assert client.get("/status").status_code == 200
 
@@ -180,10 +204,44 @@ def test_revoked_token_cookie_fails():
             patch.object(deploy, "agent_registry", fake_registry2),
             patch.object(deploy, "BrowserAgent", return_value=fake_agent),
         ):
-            new_client = TestClient(deploy.create_app())
+            new_client = TestClient(deploy.create_app(), base_url=BASE_URL)
             # Copy the cookie from old client
             new_client.cookies = client.cookies
             assert new_client.get("/status").status_code == 401
+
+
+# ---- Token configuration ----
+
+
+@pytest.mark.parametrize("tokens", ["", " ", ",", " , "])
+def test_app_refuses_to_start_without_tokens(tokens):
+    with patch.dict(os.environ, {**ENV, "RODNEY_API_TOKENS": tokens}):
+        import deploy
+
+        with pytest.raises(RuntimeError, match="RODNEY_API_TOKENS"):
+            deploy.create_app()
+
+
+def test_app_refuses_to_start_without_cookie_secret():
+    with patch.dict(os.environ, {**ENV, "RODNEY_COOKIE_SECRET": ""}):
+        import deploy
+
+        with pytest.raises(RuntimeError, match="RODNEY_COOKIE_SECRET"):
+            deploy.create_app()
+
+
+def test_empty_entries_in_token_list_are_ignored():
+    with patch.dict(os.environ, {**ENV, "RODNEY_API_TOKENS": "alpha-token-aaa,, "}):
+        import deploy
+
+        with (
+            patch.object(deploy, "agent_registry", FakeRegistry()),
+            patch.object(deploy, "BrowserAgent", return_value=_make_fake_agent()),
+        ):
+            client = TestClient(deploy.create_app(), base_url=BASE_URL)
+            assert client.get("/status", headers={"Authorization": "Bearer "}).status_code == 401
+            assert client.post("/login", data={"token": " "}).status_code in (401, 422)
+            assert client.get("/status", headers={"Authorization": "Bearer alpha-token-aaa"}).status_code == 200
 
 
 # ---- Public routes ----

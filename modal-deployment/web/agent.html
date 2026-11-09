@@ -324,8 +324,9 @@ body{
 
   overlay.addEventListener('click', async function(e) {
     const rect = screen.getBoundingClientRect();
-    const scaleX = S.vpW / rect.width;
-    const scaleY = S.vpH / rect.height;
+    // Screenshots are taken at device scale 1, so image pixels are CSS pixels.
+    const scaleX = (screen.naturalWidth || S.vpW) / rect.width;
+    const scaleY = (screen.naturalHeight || S.vpH) / rect.height;
     const x = Math.round((e.clientX - rect.left) * scaleX);
     const y = Math.round((e.clientY - rect.top) * scaleY);
     showRipple(e.clientX - $$('viewport').getBoundingClientRect().left,
@@ -371,7 +372,7 @@ body{
     const sel = $$('type-selector').value.trim();
     const txt = $$('type-text').value;
     if (!sel || !txt) return;
-    await api('POST', '/run', { args: ['type', sel, txt] });
+    await api('POST', '/run', { args: ['input', sel, txt] });
     $$('type-overlay').classList.remove('show');
     $$('type-selector').value = ''; $$('type-text').value = '';
     await refreshScreen();
@@ -424,6 +425,8 @@ body{
   loadPollMode();
   detectViewport();
   dot.className = 'indicator live';
+  // first frame now, not after the first poll interval (5s by default)
+  refreshScreen(); syncUrl(); syncTitle();
   poll();
 })();
 </script>
